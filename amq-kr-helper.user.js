@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AMQ KR Helper (DOM inject, no jQuery)
 // @namespace    amq-kr-helper
-// @version      1.16
+// @version      1.2
 // @description  다음문제 갔을때 자동으로 한글정답 입력칸에 포커싱
 // @author       You
 // @match        https://animemusicquiz.com/*
