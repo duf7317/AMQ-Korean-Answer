@@ -7,6 +7,8 @@
 // @match        https://animemusicquiz.com/*
 // @run-at       document-end
 // @grant        unsafeWindow
+// @updateURL    https://raw.githubusercontent.com/duf7317/AMQ-Korean-Answer/main/amq-kr-helper.user.js
+// @downloadURL  https://raw.githubusercontent.com/duf7317/AMQ-Korean-Answer/main/amq-kr-helper.user.js
 // ==/UserScript==
 
 (function () {
