@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         AMQ KR Helper (DOM inject, no jQuery)
 // @namespace    amq-kr-helper
-// @version      1.3
-// @description  다음문제 갔을때 자동으로 한글정답 입력칸에 포커싱
+// @version      1.4
+// @description  시트 수정 1분 단위로 자동 갱신
 // @author       You
 // @match        https://animemusicquiz.com/*
 // @run-at       document-end
@@ -432,6 +432,7 @@
       cachedData.mapEnToKo = mapEnToKo;
       lastTsvText = tsvText;
       log("시트1 변경 감지: 데이터 자동 갱신됨");
+      removeKrAnswerHelper();
       if (typeof window.__krHelperTryInject === "function") window.__krHelperTryInject();
     } catch (err) {
       warn("시트 갱신 실패:", err);
