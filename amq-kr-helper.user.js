@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AMQ KR Helper (DOM inject, no jQuery)
 // @namespace    amq-kr-helper
-// @version      1.2
+// @version      1.3
 // @description  다음문제 갔을때 자동으로 한글정답 입력칸에 포커싱
 // @author       You
 // @match        https://animemusicquiz.com/*
@@ -19,9 +19,18 @@
 
   const TAG = "[KR Helper]";
   const STORAGE_KEY = "amq-kr-helper-enabled";
+  const SHEET_POLL_INTERVAL_MS = 60 * 1000; // 시트 변경 감지 주기 (1분)
   const log = (...a) => console.log(TAG, ...a);
   const warn = (...a) => console.warn(TAG, ...a);
   const error = (...a) => console.error(TAG, ...a);
+
+  /** 시트 데이터 캐시 (주기 갱신 시 여기 덮어씀) */
+  let cachedData = {
+    mapKoToEn: new Map(),
+    uniqueKoList: [],
+    mapEnToKo: new Map(),
+  };
+  let lastTsvText = "";
 
   function isEnabled() {
     return localStorage.getItem(STORAGE_KEY) !== "false";
@@ -412,24 +421,44 @@
     return true;
   }
 
-  async function main() {
-    let mapEnToKo = new Map();
+  /** 시트 URL 재요청 후 내용이 바뀌면 캐시 갱신 및 UI 재적용 */
+  async function refreshSheetData() {
     try {
       const tsvText = await fetchTSV(SHEET_URL);
-      const { mapKoToEn, uniqueKoList, mapEnToKo: parsedEnToKo } = parseTSV(tsvText);
-      mapEnToKo = parsedEnToKo;
+      if (tsvText === lastTsvText) return;
+      const { mapKoToEn, uniqueKoList, mapEnToKo } = parseTSV(tsvText);
+      cachedData.mapKoToEn = mapKoToEn;
+      cachedData.uniqueKoList = uniqueKoList;
+      cachedData.mapEnToKo = mapEnToKo;
+      lastTsvText = tsvText;
+      log("시트1 변경 감지: 데이터 자동 갱신됨");
+      if (typeof window.__krHelperTryInject === "function") window.__krHelperTryInject();
+    } catch (err) {
+      warn("시트 갱신 실패:", err);
+    }
+  }
+
+  async function main() {
+    try {
+      const tsvText = await fetchTSV(SHEET_URL);
+      const { mapKoToEn, uniqueKoList, mapEnToKo } = parseTSV(tsvText);
+      cachedData.mapKoToEn = mapKoToEn;
+      cachedData.uniqueKoList = uniqueKoList;
+      cachedData.mapEnToKo = mapEnToKo;
+      lastTsvText = tsvText;
 
       if (mapKoToEn.size === 0) warn("No valid mappings found in sheet");
 
       const tryInject = () => {
         try {
           setupToggleCheckbox(tryInject);
-          injectUI(mapKoToEn, uniqueKoList);
+          injectUI(cachedData.mapKoToEn, cachedData.uniqueKoList);
           removeKrHelperFromNonFirstContainers();
         } catch (e) {
           // silent fail
         }
       };
+      window.__krHelperTryInject = tryInject;
 
       tryInject();
       setupPopupGuard();
@@ -443,13 +472,14 @@
       observer.observe(document.documentElement, { childList: true, subtree: true });
 
       setInterval(tryInject, 1000);
+
+      setInterval(refreshSheetData, SHEET_POLL_INTERVAL_MS);
     } catch (err) {
       error("Initialization failed:", err);
     }
-    return mapEnToKo;
   }
 
-  const mapEnToKo = main();
+  main();
 
   const multiple_chat_observer = new MutationObserver((mutations) => {
     if (!isEnabled()) return;
@@ -467,8 +497,8 @@
       return "10px";
     }
 
-    async function unzip_map() {
-      const unzip_mapEnToKo = await mapEnToKo;
+    function unzip_map() {
+      const unzip_mapEnToKo = cachedData.mapEnToKo;
       texts.forEach((element) => {
         if (!element) return;
         const currentText = element.textContent;
