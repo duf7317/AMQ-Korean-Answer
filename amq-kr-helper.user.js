@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AMQ KR Helper
 // @namespace    amq-kr-helper
-// @version      1.10.0
+// @version      1.10.1
 // @description  AMQ 원래 입력을 유지하면서 한글/영문/로마자 별칭 검색을 보조합니다.
 // @match        https://animemusicquiz.com/*
 // @match        https://www.animemusicquiz.com/*
@@ -20,7 +20,7 @@
 (() => {
     'use strict';
 
-    const VERSION = '1.10.0';
+    const VERSION = '1.10.1';
     const DEFAULT_SHEET_URL = 'https://docs.google.com/spreadsheets/d/19-YDyMy__mPoP5Ozi7nPJ-A83XwsljODhhqmzuv1P2g/export?format=tsv&gid=0';
     const REFRESH_MS = 60_000;
     const MAX_KR_RESULTS = 50;
@@ -48,6 +48,7 @@
     let lastRenderSignature = '';
     let amqDropdownEnabled = sessionStorage.getItem('amqKrHelperNativeDropdownEnabled') !== 'false';
     const nativeListObservers = new WeakMap();
+    let pendingCompositionArrow = 0;
     let refreshTimer = null;
     let watchTimer = null;
     let observer = null;
@@ -476,15 +477,37 @@
         queueRender();
     }
 
+    function applyPendingCompositionArrow() {
+        if (!pendingCompositionArrow || !enabled || !amqDropdownEnabled || !answerInput?.value) return;
+        const direction = pendingCompositionArrow;
+        pendingCompositionArrow = 0;
+        renderPopup(answerInput.value, null, true);
+        const list = getNativeList();
+        if (!list || list.hidden || !matches.length) return;
+        selectedIndex = direction > 0 ? 0 : matches.length - 1;
+        updateKeyboardSelection(list);
+    }
+
     function onCompositionEnd() {
         if (!enabled || !amqDropdownEnabled) return;
         queueRender();
+        // IME가 첫 방향키를 글자 확정에 사용했다면 확정 직후 동일 방향 선택으로 이어간다.
+        queueMicrotask(applyPendingCompositionArrow);
+    }
+
+    function onKeyUp(event) {
+        if (!pendingCompositionArrow || event.isComposing) return;
+        if (event.key === 'ArrowDown' || event.key === 'ArrowUp') queueMicrotask(applyPendingCompositionArrow);
     }
 
     function onKeyDown(event) {
         if (bypassNextEnter && event.key === 'Enter') {
             bypassNextEnter = false;
             return;
+        }
+        if (event.isComposing && hasHangul(answerInput?.value || '') && (event.key === 'ArrowDown' || event.key === 'ArrowUp')) {
+            pendingCompositionArrow = event.key === 'ArrowDown' ? 1 : -1;
+            return; // IME의 글자 확정은 막지 않고, compositionend 직후 선택을 적용한다.
         }
         if (!amqDropdownEnabled && hasHangul(answerInput?.value || '')) return;
         let nativeList = getNativeList();
@@ -542,6 +565,7 @@
         if (answerInput) {
             answerInput.removeEventListener('input', onInput);
             answerInput.removeEventListener('keydown', onKeyDown, true);
+            answerInput.removeEventListener('keyup', onKeyUp, true);
             answerInput.removeEventListener('compositionend', onCompositionEnd);
             answerInput.closest('.awesomplete')?.classList.remove('krh-answer-wrapper');
         }
@@ -549,6 +573,7 @@
         answerInput.closest('.awesomplete')?.classList.add('krh-answer-wrapper');
         answerInput.addEventListener('input', onInput);
         answerInput.addEventListener('keydown', onKeyDown, true);
+        answerInput.addEventListener('keyup', onKeyUp, true);
         answerInput.addEventListener('compositionend', onCompositionEnd);
         observeNativeLists();
     }
