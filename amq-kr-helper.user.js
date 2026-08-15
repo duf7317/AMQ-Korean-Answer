@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AMQ KR Helper
 // @namespace    amq-kr-helper
-// @version      1.8.5
+// @version      1.9.0
 // @description  AMQ 원래 입력을 유지하면서 한글/영문/로마자 별칭 검색을 보조합니다.
 // @match        https://animemusicquiz.com/*
 // @match        https://www.animemusicquiz.com/*
@@ -20,7 +20,7 @@
 (() => {
     'use strict';
 
-    const VERSION = '1.8.5';
+    const VERSION = '1.9.0';
     const DEFAULT_SHEET_URL = 'https://docs.google.com/spreadsheets/d/19-YDyMy__mPoP5Ozi7nPJ-A83XwsljODhhqmzuv1P2g/export?format=tsv&gid=0';
     const REFRESH_MS = 60_000;
     const MAX_KR_RESULTS = 50;
@@ -186,8 +186,7 @@
             #${POPUP_ID} .krh-title{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
             #${POPUP_ID} .krh-target{display:block;margin-top:1px;color:#777;font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
             #${POPUP_ID} .krh-item:hover .krh-target,#${POPUP_ID} .krh-item.sel .krh-target{color:#e7f1fb}
-            .awesomplete.krh-answer-wrapper > ul[role="listbox"]{display:none!important;visibility:hidden!important;pointer-events:none!important}
-            ul.krh-native-hidden{display:none!important;visibility:hidden!important;pointer-events:none!important}
+            .awesomplete ul[role="listbox"] > li[data-krh="true"]{white-space:normal}
         `;
         document.head.appendChild(style);
     }
@@ -214,7 +213,13 @@
 
     function hidePopup() {
         if (popup) popup.style.display = 'none';
-        getNativeLists().forEach(native => native.classList.remove('krh-native-hidden'));
+        getNativeLists().forEach(native => {
+            native.querySelectorAll('li[data-krh="true"]').forEach(item => item.remove());
+            native.querySelectorAll('li[data-krh-native-hidden="true"]').forEach(item => {
+                item.style.removeProperty('display');
+                delete item.dataset.krhNativeHidden;
+            });
+        });
         matches = [];
         selectedIndex = -1;
         lastRenderSignature = '';
@@ -257,7 +262,7 @@
         const output = [];
         const seen = new Set();
         getNativeLists().forEach(list => {
-            Array.from(list.querySelectorAll('li')).forEach((element, index) => {
+            Array.from(list.querySelectorAll('li:not([data-krh="true"])')).forEach((element, index) => {
                 const label = (element.getAttribute('data-value') || element.textContent || '').trim();
                 const key = compact(label);
                 if (!label || !key || seen.has(key)) return;
@@ -271,11 +276,13 @@
     function buildUnifiedMatches(query, krRows) {
         const result = [];
         const seen = new Set();
-        for (const candidate of nativeCandidates()) {
-            const key = compact(candidate.target);
-            if (!key || seen.has(`amq:${key}`)) continue;
-            seen.add(`amq:${key}`);
-            result.push(candidate);
+        if (!hasHangul(query)) {
+            for (const candidate of nativeCandidates()) {
+                const key = compact(candidate.target);
+                if (!key || seen.has(`amq:${key}`)) continue;
+                seen.add(`amq:${key}`);
+                result.push(candidate);
+            }
         }
         for (const row of krRows) {
             const target = preferredAnswer(row);
@@ -298,37 +305,48 @@
             }
             krRows = lastKrMatches;
         }
-        matches = buildUnifiedMatches(query, krRows);
-        if (!matches.length) return hidePopup();
-        ensurePopup();
-        getNativeLists().forEach(native => native.classList.add('krh-native-hidden'));
-        if (selectedIndex < 0 || selectedIndex >= matches.length) selectedIndex = 0;
-        const signature = `${selectedIndex}|${matches.map(candidate => `${candidate.type}:${candidate.label}:${candidate.target}`).join('|')}`;
-        if (!force && signature === lastRenderSignature && popup?.style.display === 'block') {
-            positionPopup();
-            return;
-        }
-        lastRenderSignature = signature;
-        popup.textContent = '';
-        matches.forEach((candidate, index) => {
-            const item = document.createElement('li');
-            item.className = `krh-item${selectedIndex === index ? ' sel' : ''}`;
-            item.setAttribute('role', 'option');
-            const title = document.createElement('span');
-            title.className = 'krh-title';
-            title.textContent = candidate.label;
-            item.appendChild(title);
-            if (candidate.type === 'kr' && compact(candidate.label) !== compact(candidate.target)) {
-                const target = document.createElement('small');
-                target.className = 'krh-target';
-                target.textContent = candidate.target;
-                item.appendChild(target);
+        const lists = getNativeLists();
+        const list = lists[0];
+        if (!list) return;
+        lists.forEach(native => native.querySelectorAll('li[data-krh="true"]').forEach(item => item.remove()));
+
+        const koreanQuery = hasHangul(query);
+        const native = nativeCandidates();
+        native.forEach(candidate => {
+            if (koreanQuery) {
+                candidate.nativeElement.style.setProperty('display', 'none', 'important');
+                candidate.nativeElement.dataset.krhNativeHidden = 'true';
+            } else if (candidate.nativeElement.dataset.krhNativeHidden === 'true') {
+                candidate.nativeElement.style.removeProperty('display');
+                delete candidate.nativeElement.dataset.krhNativeHidden;
             }
-            item.addEventListener('mousedown', event => { event.preventDefault(); choose(index); });
-            popup.appendChild(item);
         });
-        popup.style.display = 'block';
-        requestAnimationFrame(positionPopup);
+
+        const krCandidates = krRows.map(row => ({ type: 'kr', label: row.korean, target: preferredAnswer(row), row }));
+        krCandidates.forEach(candidate => {
+            const item = document.createElement('li');
+            item.dataset.krh = 'true';
+            item.setAttribute('role', 'option');
+            item.setAttribute('aria-selected', 'false');
+            item.textContent = candidate.label;
+            item.title = candidate.target;
+            candidate.nativeElement = item;
+            item.addEventListener('mousedown', event => {
+                event.preventDefault();
+                event.stopImmediatePropagation();
+                submitValue(candidate.target);
+            }, true);
+            list.appendChild(item);
+        });
+
+        matches = koreanQuery ? krCandidates : native.filter(candidate => candidate.nativeElement.style.display !== 'none').concat(krCandidates);
+        if (!matches.length) return;
+        if (selectedIndex >= matches.length) selectedIndex = -1;
+        matches.forEach((candidate, index) => candidate.nativeElement?.setAttribute('aria-selected', selectedIndex === index ? 'true' : 'false'));
+        list.hidden = false;
+        list.removeAttribute('hidden');
+        const signature = `${selectedIndex}|${matches.map(candidate => `${candidate.type}:${candidate.label}:${candidate.target}`).join('|')}`;
+        lastRenderSignature = signature;
     }
 
     function dispatchNativeInput(input) {
@@ -391,11 +409,13 @@
             bypassNextEnter = false;
             return;
         }
-        const visible = popup?.style.display === 'block' && matches.length;
+        const nativeList = getNativeList();
+        const visible = !!nativeList && !nativeList.hidden && matches.length > 0;
         if (visible && (event.key === 'ArrowDown' || event.key === 'ArrowUp')) {
             event.preventDefault();
             event.stopImmediatePropagation();
-            selectedIndex = (selectedIndex + (event.key === 'ArrowDown' ? 1 : -1) + matches.length) % matches.length;
+            if (selectedIndex < 0) selectedIndex = event.key === 'ArrowDown' ? 0 : matches.length - 1;
+            else selectedIndex = (selectedIndex + (event.key === 'ArrowDown' ? 1 : -1) + matches.length) % matches.length;
             return renderPopup(answerInput.value, lastKrMatches, true);
         }
         if (visible && event.key === 'Enter' && selectedIndex >= 0) {
@@ -574,7 +594,6 @@
     function start() {
         restoreRows();
         configureMenu();
-        ensurePopup();
         bindInput();
         replaceMultipleChoice();
         refreshSheet();
@@ -590,7 +609,11 @@
             observer.observe(document.body, { childList: true, subtree: true });
         }
         addEventListener('resize', positionPopup, { passive: true });
-        document.addEventListener('mousedown', event => { if (popup && !popup.contains(event.target) && event.target !== answerInput) hidePopup(); });
+        document.addEventListener('mousedown', event => {
+            if (event.target === answerInput) return;
+            if (getNativeLists().some(list => list.contains(event.target))) return;
+            hidePopup();
+        });
         console.info(`[AMQ KR Helper] v${VERSION} ready (${rows.length} cached aliases)`);
     }
 
