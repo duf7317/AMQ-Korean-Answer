@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AMQ KR Helper
 // @namespace    amq-kr-helper
-// @version      1.9.3
+// @version      1.9.4
 // @description  AMQ 원래 입력을 유지하면서 한글/영문/로마자 별칭 검색을 보조합니다.
 // @match        https://animemusicquiz.com/*
 // @match        https://www.animemusicquiz.com/*
@@ -20,7 +20,7 @@
 (() => {
     'use strict';
 
-    const VERSION = '1.9.3';
+    const VERSION = '1.9.4';
     const DEFAULT_SHEET_URL = 'https://docs.google.com/spreadsheets/d/19-YDyMy__mPoP5Ozi7nPJ-A83XwsljODhhqmzuv1P2g/export?format=tsv&gid=0';
     const REFRESH_MS = 60_000;
     const MAX_KR_RESULTS = 50;
@@ -33,7 +33,7 @@
     };
     const LEGACY_ROW_KEYS = ['amqKrHelperRowsV16', 'amqKrHelperRows', 'krHelperRows', 'amq_kr_rows'];
     const ANSWER_SELECTORS = ['#qpAnswerInput', '#qpAnswerInput input', 'input.qpAnswerInput', '.qpAnswerInput input'];
-    const MULTIPLE_CHOICE_SELECTORS = ['#qpMultipleChoiceContainer .qpMultipleChoiceEntryText', '#qpMultipleChoiceContainer .clickAble', '#qpMultipleChoiceContainer button', '.qpMultipleChoiceAnswer'];
+    const MULTIPLE_CHOICE_SELECTOR = '#qpMultipleChoiceContainer .qpMultipleChoiceEntryText';
 
     let rows = [];
     let answerInput = null;
@@ -190,6 +190,7 @@
             #${POPUP_ID} .krh-target{display:block;margin-top:1px;color:#777;font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
             #${POPUP_ID} .krh-item:hover .krh-target,#${POPUP_ID} .krh-item.sel .krh-target{color:#e7f1fb}
             .awesomplete ul[role="listbox"] > li[data-krh="true"]{white-space:normal}
+            #qpMultipleChoiceContainer .qpMultipleChoiceEntryTextContainer .qpMultipleChoiceEntryText{overflow:visible!important;white-space:normal!important;word-break:keep-all!important;line-height:1.15!important}
         `;
         document.head.appendChild(style);
     }
@@ -517,17 +518,48 @@
     }
 
     function replaceMultipleChoice() {
-        if (!enabled || !rows.length) return;
+        const elements = document.querySelectorAll(MULTIPLE_CHOICE_SELECTOR);
+        if (!enabled) {
+            elements.forEach(element => {
+                if (element.dataset.krhApplied !== 'true') return;
+                if (element.textContent.trim() === element.dataset.krhKorean) {
+                    element.textContent = element.dataset.krhOriginalText || element.textContent;
+                }
+                element.style.fontSize = element.dataset.krhOriginalFontSize || '';
+                element.title = element.dataset.krhOriginalTitle || '';
+                delete element.dataset.krhApplied;
+                delete element.dataset.krhKorean;
+                delete element.dataset.krhOriginalText;
+                delete element.dataset.krhOriginalFontSize;
+                delete element.dataset.krhOriginalTitle;
+            });
+            return;
+        }
+        if (!rows.length) return;
         const byAnswer = new Map();
         rows.forEach(row => {
             [row.english, row.romaji].filter(Boolean).forEach(name => byAnswer.set(compact(name), row.korean));
         });
-        document.querySelectorAll(MULTIPLE_CHOICE_SELECTORS.join(',')).forEach(element => {
-            if (element.dataset.krhOriginalText) return;
+        elements.forEach(element => {
+            if (element.dataset.krhApplied === 'true') {
+                if (element.textContent.trim() === element.dataset.krhKorean) return;
+                // AMQ가 같은 요소를 다음 문제의 새 선택지로 재사용한 경우 이전 표시를 폐기한다.
+                element.style.fontSize = element.dataset.krhOriginalFontSize || '';
+                element.title = element.dataset.krhOriginalTitle || '';
+                delete element.dataset.krhApplied;
+                delete element.dataset.krhKorean;
+                delete element.dataset.krhOriginalText;
+                delete element.dataset.krhOriginalFontSize;
+                delete element.dataset.krhOriginalTitle;
+            }
             const original = element.textContent.trim();
             const korean = byAnswer.get(compact(original));
             if (!korean) return;
             element.dataset.krhOriginalText = original;
+            element.dataset.krhOriginalFontSize = element.style.fontSize || '';
+            element.dataset.krhOriginalTitle = element.title || '';
+            element.dataset.krhKorean = korean;
+            element.dataset.krhApplied = 'true';
             element.textContent = korean;
             element.title = original;
             element.style.fontSize = korean.length <= 12 ? '18px' : korean.length <= 20 ? '14px' : korean.length <= 28 ? '12px' : '10px';
@@ -620,7 +652,10 @@
             refreshSheet();
         });
         GM_registerMenuCommand(enabled ? 'KR Helper 끄기' : 'KR Helper 켜기', () => {
-            enabled = !enabled; saveValue(STORAGE.enabled, enabled); if (!enabled) hidePopup(); else refreshSheet();
+            enabled = !enabled;
+            saveValue(STORAGE.enabled, enabled);
+            if (!enabled) hidePopup(); else refreshSheet();
+            replaceMultipleChoice();
         });
         GM_registerMenuCommand('KR Helper 지금 새로고침', refreshSheet);
     }
@@ -642,6 +677,7 @@
         checkbox.addEventListener('change', () => {
             enabled = checkbox.checked; saveValue(STORAGE.enabled, enabled);
             if (!enabled) hidePopup(); else { refreshSheet(); if (answerInput?.value) renderPopup(answerInput.value); }
+            replaceMultipleChoice();
         });
         label.append(checkbox, document.createTextNode('KR Helper'));
         container.parentElement.insertBefore(label, container);
