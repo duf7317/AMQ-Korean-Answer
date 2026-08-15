@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AMQ KR Helper
 // @namespace    amq-kr-helper
-// @version      1.10.9
+// @version      1.10.10
 // @description  AMQ 원래 입력을 유지하면서 한글/영문/로마자 별칭 검색을 보조합니다.
 // @match        https://animemusicquiz.com/*
 // @match        https://www.animemusicquiz.com/*
@@ -405,8 +405,9 @@
         const native = nativeCandidates();
         native.forEach(candidate => {
             if (koreanQuery) {
-                candidate.nativeElement.style.setProperty('display', 'none', 'important');
-                candidate.nativeElement.dataset.krhNativeHidden = 'true';
+                // AMQ가 직전 영문 검색에서 남긴 후보는 한글 검색 목록에서 완전히 제거한다.
+                // 다음 영문 입력 시 Awesomplete가 현재 검색어로 후보 DOM을 다시 생성한다.
+                candidate.nativeElement.remove();
             } else if (candidate.nativeElement.dataset.krhNativeHidden === 'true') {
                 candidate.nativeElement.style.removeProperty('display');
                 delete candidate.nativeElement.dataset.krhNativeHidden;
