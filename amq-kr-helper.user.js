@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AMQ KR Helper
 // @namespace    amq-kr-helper
-// @version      1.10.3
+// @version      1.10.4
 // @description  AMQ 원래 입력을 유지하면서 한글/영문/로마자 별칭 검색을 보조합니다.
 // @match        https://animemusicquiz.com/*
 // @match        https://www.animemusicquiz.com/*
@@ -445,6 +445,9 @@
         hidePopup();
         answerInput.value = value;
         dispatchNativeInput(answerInput);
+        // 변환된 영문 값을 넣는 input 이벤트가 AMQ 자동완성을 다시 열 수 있으므로
+        // 이 제출값은 새 사용자 입력이 생길 때까지 닫힌 상태로 기억한다.
+        dismissedQuery = normalize(value);
         renderSerial += 1;
         renderTimers.forEach(clearTimeout);
         renderTimers = [];
@@ -452,6 +455,8 @@
         setTimeout(() => {
             answerInput.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true }));
             answerInput.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true }));
+            hidePopup(true);
+            requestAnimationFrame(() => hidePopup(true));
         }, 20);
     }
 
