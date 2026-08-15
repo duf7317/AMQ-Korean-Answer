@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AMQ KR Helper
 // @namespace    amq-kr-helper
-// @version      1.10.2
+// @version      1.10.3
 // @description  AMQ 원래 입력을 유지하면서 한글/영문/로마자 별칭 검색을 보조합니다.
 // @match        https://animemusicquiz.com/*
 // @match        https://www.animemusicquiz.com/*
@@ -41,6 +41,7 @@
     let matches = [];
     let selectedIndex = -1;
     let selectionActivated = false;
+    let dismissedQuery = '';
     let bypassNextEnter = false;
     let renderSerial = 0;
     let renderTimers = [];
@@ -220,7 +221,7 @@
         popup.style.width = `${rect.width}px`;
     }
 
-    function hidePopup() {
+    function hidePopup(closeNative = false) {
         if (popup) popup.style.display = 'none';
         getNativeLists().forEach(native => {
             native.querySelectorAll('li[data-krh="true"]').forEach(item => item.remove());
@@ -228,6 +229,10 @@
                 item.style.removeProperty('display');
                 delete item.dataset.krhNativeHidden;
             });
+            if (closeNative) {
+                native.hidden = true;
+                native.setAttribute('hidden', '');
+            }
         });
         matches = [];
         selectedIndex = -1;
@@ -370,6 +375,7 @@
     function renderPopup(query, krRows = null, force = false) {
         if (!enabled || !amqDropdownEnabled || !answerInput || !query.trim()) return hidePopup();
         const normalizedQuery = normalize(query);
+        if (dismissedQuery && normalizedQuery === dismissedQuery) return hidePopup();
         if (!krRows) {
             if (normalizedQuery !== lastKrQuery) {
                 lastKrQuery = normalizedQuery;
@@ -479,6 +485,7 @@
 
     function onInput() {
         if (!enabled || !amqDropdownEnabled) return hidePopup();
+        dismissedQuery = '';
         queueRender();
     }
 
@@ -520,6 +527,7 @@
         let visible = !!nativeList && !nativeList.hidden && matches.length > 0;
         if (!visible && !event.isComposing && hasHangul(answerInput?.value || '') && (event.key === 'ArrowDown' || event.key === 'ArrowUp')) {
             // 느린 환경에서는 첫 방향키가 목록 열기에만 소비되지 않도록 KR 후보를 즉시 확정한다.
+            dismissedQuery = '';
             renderPopup(answerInput.value, null, true);
             nativeList = getNativeList();
             visible = !!nativeList && !nativeList.hidden && matches.length > 0;
@@ -542,10 +550,15 @@
             event.stopImmediatePropagation();
             return choose(selectedIndex);
         }
-        if (visible && event.key === 'Escape') {
+        if (visible && event.key === 'Escape' && hasHangul(answerInput?.value || '')) {
             event.preventDefault();
             event.stopImmediatePropagation();
-            return hidePopup();
+            dismissedQuery = normalize(answerInput.value);
+            renderSerial += 1;
+            renderTimers.forEach(clearTimeout);
+            renderTimers = [];
+            pendingCompositionArrow = 0;
+            return hidePopup(true);
         }
         if (event.key !== 'Enter' || event.ctrlKey || event.altKey || event.metaKey || event.isComposing) return;
         const query = answerInput.value.trim();
