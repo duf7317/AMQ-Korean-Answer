@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AMQ KR Helper
 // @namespace    amq-kr-helper
-// @version      1.9.5
+// @version      1.9.6
 // @description  AMQ 원래 입력을 유지하면서 한글/영문/로마자 별칭 검색을 보조합니다.
 // @match        https://animemusicquiz.com/*
 // @match        https://www.animemusicquiz.com/*
@@ -20,7 +20,7 @@
 (() => {
     'use strict';
 
-    const VERSION = '1.9.5';
+    const VERSION = '1.9.6';
     const DEFAULT_SHEET_URL = 'https://docs.google.com/spreadsheets/d/19-YDyMy__mPoP5Ozi7nPJ-A83XwsljODhhqmzuv1P2g/export?format=tsv&gid=0';
     const REFRESH_MS = 60_000;
     const MAX_KR_RESULTS = 50;
@@ -553,7 +553,11 @@
         if (!rows.length) return;
         const byAnswer = new Map();
         rows.forEach(row => {
-            [row.english, row.romaji].filter(Boolean).forEach(name => byAnswer.set(compact(name), row.korean));
+            [row.english, row.romaji].filter(Boolean).forEach(name => {
+                const key = compact(name);
+                // 같은 정답의 쉼표 별칭은 시트에 적힌 첫 번째 이름을 대표명으로 유지한다.
+                if (!byAnswer.has(key)) byAnswer.set(key, row.korean);
+            });
         });
         elements.forEach(element => {
             if (element.dataset.krhApplied === 'true') {
