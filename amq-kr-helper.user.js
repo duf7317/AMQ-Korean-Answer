@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AMQ KR Helper
 // @namespace    amq-kr-helper
-// @version      1.9.8
+// @version      1.9.9
 // @description  AMQ 원래 입력을 유지하면서 한글/영문/로마자 별칭 검색을 보조합니다.
 // @match        https://animemusicquiz.com/*
 // @match        https://www.animemusicquiz.com/*
@@ -20,7 +20,7 @@
 (() => {
     'use strict';
 
-    const VERSION = '1.9.8';
+    const VERSION = '1.9.9';
     const DEFAULT_SHEET_URL = 'https://docs.google.com/spreadsheets/d/19-YDyMy__mPoP5Ozi7nPJ-A83XwsljODhhqmzuv1P2g/export?format=tsv&gid=0';
     const REFRESH_MS = 60_000;
     const MAX_KR_RESULTS = 50;
@@ -357,6 +357,13 @@
         else if (itemBottom > viewBottom) list.scrollTop = itemBottom - list.clientHeight;
     }
 
+    function updateKeyboardSelection(list) {
+        matches.forEach((candidate, index) => {
+            candidate.nativeElement?.setAttribute('aria-selected', selectedIndex === index ? 'true' : 'false');
+        });
+        if (selectedIndex >= 0) scrollSelectionIntoView(list, matches[selectedIndex]?.nativeElement);
+    }
+
     function renderPopup(query, krRows = null, force = false) {
         if (!enabled || !amqDropdownEnabled || !answerInput || !query.trim()) return hidePopup();
         const normalizedQuery = normalize(query);
@@ -482,7 +489,9 @@
             event.stopImmediatePropagation();
             if (selectedIndex < 0) selectedIndex = event.key === 'ArrowDown' ? 0 : matches.length - 1;
             else selectedIndex = (selectedIndex + (event.key === 'ArrowDown' ? 1 : -1) + matches.length) % matches.length;
-            return renderPopup(answerInput.value, lastKrMatches, true);
+            // 방향키 이동 중에는 KR 항목 DOM을 재생성하지 않고 선택 상태만 바꾼다.
+            updateKeyboardSelection(nativeList);
+            return;
         }
         if (visible && event.key === 'Enter' && selectedIndex >= 0) {
             event.preventDefault();
