@@ -75,10 +75,19 @@
     function hasHangul(value) { return /[ㄱ-ㅎㅏ-ㅣ가-힣]/.test(value); }
     function tokens(value) { return normalize(value).split(' ').filter(Boolean); }
 
+    function rowValue(raw, names) {
+        const wanted = new Set(names.map(name => name.toLowerCase().replace(/[^a-z가-힣]/g, '')));
+        for (const [key, value] of Object.entries(raw || {})) {
+            const normalizedKey = key.toLowerCase().replace(/[^a-z가-힣]/g, '');
+            if (wanted.has(normalizedKey)) return value;
+        }
+        return '';
+    }
+
     function prepareRow(raw, index) {
-        const korean = String(raw.KoreanAnswer ?? raw.koreanAnswer ?? raw.korean ?? raw['한글'] ?? '').trim();
-        const english = String(raw.EnglishAnswer ?? raw.englishAnswer ?? raw.english ?? raw['영어'] ?? '').trim();
-        const romaji = String(raw.Romaji ?? raw.romaji ?? raw.romanji ?? raw['로마자'] ?? '').trim();
+        const korean = String(rowValue(raw, ['KoreanAnswer', 'Korean', '한글'])).trim();
+        const english = String(rowValue(raw, ['EnglishAnswer', 'EnglishAnsawer', 'English', '영어'])).trim();
+        const romaji = String(rowValue(raw, ['RomajiAnswer', 'Romaji', 'Romanji', '로마자'])).trim();
         if (!korean || (!english && !romaji)) return null;
         const item = { id: index, korean, english, romaji };
         item.nKorean = normalize(korean);
@@ -95,7 +104,7 @@
     function prepareRows(rawRows) {
         const result = [];
         (Array.isArray(rawRows) ? rawRows : []).forEach((raw, sourceIndex) => {
-            const koreanRaw = String(raw.KoreanAnswer ?? raw.koreanAnswer ?? raw.korean ?? raw['한글'] ?? '');
+            const koreanRaw = String(rowValue(raw, ['KoreanAnswer', 'Korean', '한글']));
             const aliases = koreanRaw.split(',').map(value => value.trim()).filter(Boolean);
             (aliases.length ? aliases : ['']).forEach((korean, aliasIndex) => {
                 const item = prepareRow({ ...raw, KoreanAnswer: korean }, `${sourceIndex}:${aliasIndex}`);
