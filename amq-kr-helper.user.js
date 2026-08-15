@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AMQ KR Helper
 // @namespace    amq-kr-helper
-// @version      1.9.4
+// @version      1.9.5
 // @description  AMQ 원래 입력을 유지하면서 한글/영문/로마자 별칭 검색을 보조합니다.
 // @match        https://animemusicquiz.com/*
 // @match        https://www.animemusicquiz.com/*
@@ -20,7 +20,7 @@
 (() => {
     'use strict';
 
-    const VERSION = '1.9.4';
+    const VERSION = '1.9.5';
     const DEFAULT_SHEET_URL = 'https://docs.google.com/spreadsheets/d/19-YDyMy__mPoP5Ozi7nPJ-A83XwsljODhhqmzuv1P2g/export?format=tsv&gid=0';
     const REFRESH_MS = 60_000;
     const MAX_KR_RESULTS = 50;
@@ -51,6 +51,9 @@
     let refreshTimer = null;
     let watchTimer = null;
     let observer = null;
+    let multipleChoiceObserver = null;
+    let observedMultipleChoiceContainer = null;
+    let multipleChoiceTimer = null;
     let refreshBusy = false;
     let enabled = loadValue(STORAGE.enabled, true) !== false;
     let lastSubmit = { value: '', at: 0 };
@@ -517,10 +520,8 @@
         observeNativeLists();
     }
 
-    function replaceMultipleChoice() {
-        const elements = document.querySelectorAll(MULTIPLE_CHOICE_SELECTOR);
-        if (!enabled) {
-            elements.forEach(element => {
+    function restoreMultipleChoice(elements = document.querySelectorAll(MULTIPLE_CHOICE_SELECTOR)) {
+        elements.forEach(element => {
                 if (element.dataset.krhApplied !== 'true') return;
                 if (element.textContent.trim() === element.dataset.krhKorean) {
                     element.textContent = element.dataset.krhOriginalText || element.textContent;
@@ -532,7 +533,21 @@
                 delete element.dataset.krhOriginalText;
                 delete element.dataset.krhOriginalFontSize;
                 delete element.dataset.krhOriginalTitle;
-            });
+        });
+    }
+
+    function isMultipleChoiceVisible(container) {
+        if (!container?.isConnected) return false;
+        const style = getComputedStyle(container);
+        const rect = container.getBoundingClientRect();
+        return style.display !== 'none' && style.visibility !== 'hidden' && !container.hidden && rect.width > 0 && rect.height > 0;
+    }
+
+    function replaceMultipleChoice() {
+        const container = document.getElementById('qpMultipleChoiceContainer');
+        const elements = container?.querySelectorAll('.qpMultipleChoiceEntryText') || [];
+        if (!enabled || !isMultipleChoiceVisible(container)) {
+            restoreMultipleChoice(elements);
             return;
         }
         if (!rows.length) return;
@@ -564,6 +579,31 @@
             element.title = original;
             element.style.fontSize = korean.length <= 12 ? '18px' : korean.length <= 20 ? '14px' : korean.length <= 28 ? '12px' : '10px';
         });
+    }
+
+    function ensureMultipleChoiceObserver() {
+        const container = document.getElementById('qpMultipleChoiceContainer');
+        if (!container || container === observedMultipleChoiceContainer) return;
+        multipleChoiceObserver?.disconnect();
+        observedMultipleChoiceContainer = container;
+        multipleChoiceObserver = new MutationObserver(() => {
+            clearTimeout(multipleChoiceTimer);
+            // 숨겨지는 순간에는 원문을 즉시 복구해 AMQ의 다음 선택지 갱신을 방해하지 않는다.
+            if (!isMultipleChoiceVisible(container)) {
+                restoreMultipleChoice(container.querySelectorAll('.qpMultipleChoiceEntryText'));
+                return;
+            }
+            // AMQ가 네 선택지를 모두 채운 뒤 한 번만 번역한다.
+            multipleChoiceTimer = setTimeout(replaceMultipleChoice, 35);
+        });
+        multipleChoiceObserver.observe(container, {
+            childList: true,
+            subtree: true,
+            characterData: true,
+            attributes: true,
+            attributeFilter: ['class', 'style', 'hidden']
+        });
+        replaceMultipleChoice();
     }
 
     function parseCsv(text) {
@@ -691,14 +731,15 @@
         replaceMultipleChoice();
         refreshSheet();
         if (!refreshTimer) refreshTimer = setInterval(refreshSheet, REFRESH_MS);
-        if (!watchTimer) watchTimer = setInterval(() => { ensureToggle(); bindInput(); replaceMultipleChoice(); }, 1000);
+        ensureMultipleChoiceObserver();
+        if (!watchTimer) watchTimer = setInterval(() => { ensureToggle(); bindInput(); ensureMultipleChoiceObserver(); replaceMultipleChoice(); }, 1000);
         if (!observer) {
             let scheduled = false;
             observer = new MutationObserver(mutations => {
                 mutations.forEach(mutation => mutation.addedNodes.forEach(detectDropdownCommandState));
                 if (scheduled) return;
                 scheduled = true;
-                requestAnimationFrame(() => { scheduled = false; bindInput(); replaceMultipleChoice(); });
+                requestAnimationFrame(() => { scheduled = false; bindInput(); ensureMultipleChoiceObserver(); replaceMultipleChoice(); });
             });
             observer.observe(document.body, { childList: true, subtree: true });
         }
