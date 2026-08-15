@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AMQ KR Helper
 // @namespace    amq-kr-helper
-// @version      1.9.0
+// @version      1.9.1
 // @description  AMQ 원래 입력을 유지하면서 한글/영문/로마자 별칭 검색을 보조합니다.
 // @match        https://animemusicquiz.com/*
 // @match        https://www.animemusicquiz.com/*
@@ -20,7 +20,7 @@
 (() => {
     'use strict';
 
-    const VERSION = '1.9.0';
+    const VERSION = '1.9.1';
     const DEFAULT_SHEET_URL = 'https://docs.google.com/spreadsheets/d/19-YDyMy__mPoP5Ozi7nPJ-A83XwsljODhhqmzuv1P2g/export?format=tsv&gid=0';
     const REFRESH_MS = 60_000;
     const MAX_KR_RESULTS = 50;
@@ -46,6 +46,7 @@
     let lastKrQuery = '';
     let lastKrMatches = [];
     let lastRenderSignature = '';
+    let amqDropdownEnabled = sessionStorage.getItem('amqKrHelperNativeDropdownEnabled') !== 'false';
     let refreshTimer = null;
     let watchTimer = null;
     let observer = null;
@@ -225,6 +226,24 @@
         lastRenderSignature = '';
     }
 
+    function setAmqDropdownEnabled(value) {
+        if (amqDropdownEnabled === value) return;
+        amqDropdownEnabled = value;
+        sessionStorage.setItem('amqKrHelperNativeDropdownEnabled', value ? 'true' : 'false');
+        if (!value) hidePopup();
+        else if (enabled && answerInput?.value) queueRender();
+        console.info(`[AMQ KR Helper] AMQ dropdown ${value ? 'enabled' : 'disabled'}`);
+    }
+
+    function detectDropdownCommandState(node) {
+        const text = String(node?.textContent || '');
+        if (!text) return;
+        const disabledAt = text.toLowerCase().lastIndexOf('dropdown disabled');
+        const enabledAt = text.toLowerCase().lastIndexOf('dropdown enabled');
+        if (disabledAt < 0 && enabledAt < 0) return;
+        setAmqDropdownEnabled(enabledAt > disabledAt);
+    }
+
     function getNativeLists() {
         if (!answerInput) return [];
         const found = new Set();
@@ -296,7 +315,7 @@
     }
 
     function renderPopup(query, krRows = null, force = false) {
-        if (!enabled || !answerInput || !query.trim()) return hidePopup();
+        if (!enabled || !amqDropdownEnabled || !answerInput || !query.trim()) return hidePopup();
         const normalizedQuery = normalize(query);
         if (!krRows) {
             if (normalizedQuery !== lastKrQuery) {
@@ -401,6 +420,7 @@
     }
 
     function onInput() {
+        if (!enabled || !amqDropdownEnabled) return hidePopup();
         queueRender();
     }
 
@@ -409,6 +429,7 @@
             bypassNextEnter = false;
             return;
         }
+        if (!amqDropdownEnabled && hasHangul(answerInput?.value || '')) return;
         const nativeList = getNativeList();
         const visible = !!nativeList && !nativeList.hidden && matches.length > 0;
         if (visible && (event.key === 'ArrowDown' || event.key === 'ArrowUp')) {
@@ -593,6 +614,7 @@
 
     function start() {
         restoreRows();
+        detectDropdownCommandState(document.body);
         configureMenu();
         bindInput();
         replaceMultipleChoice();
@@ -601,7 +623,8 @@
         if (!watchTimer) watchTimer = setInterval(() => { ensureToggle(); bindInput(); replaceMultipleChoice(); }, 1000);
         if (!observer) {
             let scheduled = false;
-            observer = new MutationObserver(() => {
+            observer = new MutationObserver(mutations => {
+                mutations.forEach(mutation => mutation.addedNodes.forEach(detectDropdownCommandState));
                 if (scheduled) return;
                 scheduled = true;
                 requestAnimationFrame(() => { scheduled = false; bindInput(); replaceMultipleChoice(); });
