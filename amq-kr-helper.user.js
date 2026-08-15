@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AMQ KR Helper
 // @namespace    amq-kr-helper
-// @version      1.8.1
+// @version      1.8.2
 // @description  AMQ 원래 입력을 유지하면서 한글/영문/로마자 별칭 검색을 보조합니다.
 // @match        https://animemusicquiz.com/*
 // @match        https://www.animemusicquiz.com/*
@@ -20,7 +20,7 @@
 (() => {
     'use strict';
 
-    const VERSION = '1.8.1';
+    const VERSION = '1.8.2';
     const DEFAULT_SHEET_URL = 'https://docs.google.com/spreadsheets/d/19-YDyMy__mPoP5Ozi7nPJ-A83XwsljODhhqmzuv1P2g/export?format=tsv&gid=0';
     const REFRESH_MS = 60_000;
     const MAX_RESULTS = 8;
@@ -169,15 +169,12 @@
         const style = document.createElement('style');
         style.id = STYLE_ID;
         style.textContent = `
-            #${POPUP_ID}{position:fixed;z-index:2147483646;display:none;width:min(420px,calc(100vw - 16px));max-height:260px;overflow:auto;background:#171b21;border:1px solid #4b596a;border-radius:7px;box-shadow:0 8px 24px #0009;color:#f3f6fa;font:13px/1.3 Arial,sans-serif}
-            #${POPUP_ID} .krh-head{padding:5px 9px;color:#9fb0c3;background:#222a34;font-size:11px;border-bottom:1px solid #394451}
-            #${POPUP_ID} .krh-item{padding:7px 9px;cursor:pointer;border-bottom:1px solid #2d3641}
-            #${POPUP_ID} .krh-item:last-child{border-bottom:0}
-            #${POPUP_ID} .krh-item:hover,#${POPUP_ID} .krh-item.sel{background:#315674}
-            #${POPUP_ID} .krh-ko{font-weight:700;color:#fff}
-            #${POPUP_ID} .krh-target{margin-top:2px;color:#b8c8d8;font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-            #${POPUP_ID} .krh-badge{display:inline-block;min-width:34px;margin-right:6px;padding:1px 4px;border-radius:3px;background:#3c4654;color:#dce6f2;font-size:10px;text-align:center;vertical-align:1px}
-            #${POPUP_ID} .krh-badge.kr{background:#70429a;color:#fff}
+            #${POPUP_ID}{position:fixed;z-index:2147483646;display:none;margin:0;padding:0;max-height:260px;overflow-y:auto;overflow-x:hidden;list-style:none;background:#fff;border:1px solid rgba(0,0,0,.3);border-radius:0 0 4px 4px;box-shadow:0 2px 4px rgba(0,0,0,.2);color:#333;font:14px/1.35 Arial,sans-serif;text-align:left}
+            #${POPUP_ID} .krh-item{display:block;margin:0;padding:6px 9px;cursor:pointer;border:0;white-space:normal;color:#333;background:#fff}
+            #${POPUP_ID} .krh-item:hover,#${POPUP_ID} .krh-item.sel{background:#3b78b4;color:#fff}
+            #${POPUP_ID} .krh-title{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+            #${POPUP_ID} .krh-target{display:block;margin-top:1px;color:#777;font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+            #${POPUP_ID} .krh-item:hover .krh-target,#${POPUP_ID} .krh-item.sel .krh-target{color:#e7f1fb}
             .awesomplete ul.krh-native-hidden{visibility:hidden!important;pointer-events:none!important}
         `;
         document.head.appendChild(style);
@@ -187,7 +184,7 @@
         ensureStyle();
         popup = document.getElementById(POPUP_ID);
         if (!popup) {
-            popup = document.createElement('div');
+            popup = document.createElement('ul');
             popup.id = POPUP_ID;
             popup.setAttribute('role', 'listbox');
             document.body.appendChild(popup);
@@ -258,24 +255,20 @@
         if (native) native.classList.add('krh-native-hidden');
         if (selectedIndex < 0 || selectedIndex >= matches.length) selectedIndex = 0;
         popup.textContent = '';
-        const head = document.createElement('div');
-        head.className = 'krh-head';
-        head.textContent = '통합 후보 · ↑/↓ 선택 · Enter 제출';
-        popup.appendChild(head);
         matches.forEach((candidate, index) => {
-            const item = document.createElement('div');
+            const item = document.createElement('li');
             item.className = `krh-item${selectedIndex === index ? ' sel' : ''}`;
             item.setAttribute('role', 'option');
-            const ko = document.createElement('div');
-            ko.className = 'krh-ko';
-            const badge = document.createElement('span');
-            badge.className = `krh-badge${candidate.type === 'kr' ? ' kr' : ''}`;
-            badge.textContent = candidate.type === 'kr' ? 'KR' : 'AMQ';
-            ko.append(badge, document.createTextNode(candidate.label));
-            const target = document.createElement('div');
-            target.className = 'krh-target';
-            target.textContent = candidate.type === 'kr' ? `→ ${candidate.target}` : 'AMQ 기본 후보';
-            item.append(ko, target);
+            const title = document.createElement('span');
+            title.className = 'krh-title';
+            title.textContent = candidate.label;
+            item.appendChild(title);
+            if (candidate.type === 'kr' && compact(candidate.label) !== compact(candidate.target)) {
+                const target = document.createElement('small');
+                target.className = 'krh-target';
+                target.textContent = candidate.target;
+                item.appendChild(target);
+            }
             item.addEventListener('mousedown', event => { event.preventDefault(); choose(index); });
             popup.appendChild(item);
         });
