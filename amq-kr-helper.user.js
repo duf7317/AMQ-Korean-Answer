@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AMQ KR Helper
 // @namespace    amq-kr-helper
-// @version      1.10.1
+// @version      1.10.2
 // @description  AMQ 원래 입력을 유지하면서 한글/영문/로마자 별칭 검색을 보조합니다.
 // @match        https://animemusicquiz.com/*
 // @match        https://www.animemusicquiz.com/*
@@ -20,7 +20,7 @@
 (() => {
     'use strict';
 
-    const VERSION = '1.10.1';
+    const VERSION = '1.10.2';
     const DEFAULT_SHEET_URL = 'https://docs.google.com/spreadsheets/d/19-YDyMy__mPoP5Ozi7nPJ-A83XwsljODhhqmzuv1P2g/export?format=tsv&gid=0';
     const REFRESH_MS = 60_000;
     const MAX_KR_RESULTS = 50;
@@ -40,6 +40,7 @@
     let popup = null;
     let matches = [];
     let selectedIndex = -1;
+    let selectionActivated = false;
     let bypassNextEnter = false;
     let renderSerial = 0;
     let renderTimers = [];
@@ -230,6 +231,7 @@
         });
         matches = [];
         selectedIndex = -1;
+        selectionActivated = false;
         lastRenderSignature = '';
     }
 
@@ -413,6 +415,8 @@
         matches = koreanQuery ? krCandidates : native.filter(candidate => candidate.nativeElement.style.display !== 'none').concat(krCandidates);
         if (!matches.length) return;
         if (selectedIndex >= matches.length) selectedIndex = -1;
+        // 한글 IME가 첫 방향키를 페이지에 전달하지 않는 환경을 위해 첫 KR 후보를 미리 선택한다.
+        if (koreanQuery && selectedIndex < 0) selectedIndex = 0;
         matches.forEach((candidate, index) => candidate.nativeElement?.setAttribute('aria-selected', selectedIndex === index ? 'true' : 'false'));
         list.hidden = false;
         list.removeAttribute('hidden');
@@ -468,6 +472,7 @@
             lastKrQuery = normalize(current);
             lastKrMatches = search(current); // 키 입력당 시트 전체 검색은 여기서 한 번만
             selectedIndex = -1;
+            selectionActivated = false;
             renderPopup(current, lastKrMatches, true);
         }, 24));
     }
@@ -485,6 +490,7 @@
         const list = getNativeList();
         if (!list || list.hidden || !matches.length) return;
         selectedIndex = direction > 0 ? 0 : matches.length - 1;
+        selectionActivated = true;
         updateKeyboardSelection(list);
     }
 
@@ -521,7 +527,11 @@
         if (visible && (event.key === 'ArrowDown' || event.key === 'ArrowUp')) {
             event.preventDefault();
             event.stopImmediatePropagation();
-            if (selectedIndex < 0) selectedIndex = event.key === 'ArrowDown' ? 0 : matches.length - 1;
+            if (!selectionActivated) {
+                selectedIndex = event.key === 'ArrowDown' ? 0 : matches.length - 1;
+                selectionActivated = true;
+            }
+            else if (selectedIndex < 0) selectedIndex = event.key === 'ArrowDown' ? 0 : matches.length - 1;
             else selectedIndex = (selectedIndex + (event.key === 'ArrowDown' ? 1 : -1) + matches.length) % matches.length;
             // 방향키 이동 중에는 KR 항목 DOM을 재생성하지 않고 선택 상태만 바꾼다.
             updateKeyboardSelection(nativeList);
