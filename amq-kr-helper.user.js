@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AMQ KR Helper
 // @namespace    amq-kr-helper
-// @version      1.8.4
+// @version      1.8.5
 // @description  AMQ 원래 입력을 유지하면서 한글/영문/로마자 별칭 검색을 보조합니다.
 // @match        https://animemusicquiz.com/*
 // @match        https://www.animemusicquiz.com/*
@@ -20,10 +20,10 @@
 (() => {
     'use strict';
 
-    const VERSION = '1.8.4';
+    const VERSION = '1.8.5';
     const DEFAULT_SHEET_URL = 'https://docs.google.com/spreadsheets/d/19-YDyMy__mPoP5Ozi7nPJ-A83XwsljODhhqmzuv1P2g/export?format=tsv&gid=0';
     const REFRESH_MS = 60_000;
-    const MAX_RESULTS = 8;
+    const MAX_KR_RESULTS = 50;
     const POPUP_ID = 'amqKrHelperAliasPopup';
     const STYLE_ID = 'amqKrHelperV17Style';
     const STORAGE = {
@@ -149,7 +149,7 @@
             if (!result) continue;
             best.push(result);
             best.sort(compare);
-            if (best.length > MAX_RESULTS) best.pop();
+            if (best.length > MAX_KR_RESULTS) best.pop();
         }
         return best.map(result => result.row);
     }
@@ -284,7 +284,8 @@
             seen.add(`kr:${key}`);
             result.push({ type: 'kr', label: row.korean, target, row });
         }
-        return result.slice(0, 15);
+        // AMQ가 제공한 원본 후보는 하나도 자르지 않고, 정렬된 KR 후보만 추가한다.
+        return result;
     }
 
     function renderPopup(query, krRows = null, force = false) {
