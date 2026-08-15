@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AMQ KR Helper
 // @namespace    amq-kr-helper
-// @version      1.10.7
+// @version      1.10.8
 // @description  AMQ 원래 입력을 유지하면서 한글/영문/로마자 별칭 검색을 보조합니다.
 // @match        https://animemusicquiz.com/*
 // @match        https://www.animemusicquiz.com/*
@@ -220,6 +220,16 @@
         popup.style.width = `${rect.width}px`;
     }
 
+    function isAnswerInputActive() {
+        if (!answerInput?.isConnected || answerInput.disabled || answerInput.readOnly) return false;
+        if (!answerInput.getClientRects().length) return false;
+        const style = getComputedStyle(answerInput);
+        if (style.display === 'none' || style.visibility === 'hidden') return false;
+        const container = answerInput.closest('#qpAnswerInput, #qpAnswerInputContainer, .qpAnswerInput');
+        if (container && !container.getClientRects().length) return false;
+        return true;
+    }
+
     function hidePopup(closeNative = false) {
         if (popup) popup.style.display = 'none';
         getNativeLists().forEach(native => {
@@ -229,8 +239,7 @@
                 delete item.dataset.krhNativeHidden;
             });
             if (closeNative) {
-                native.hidden = true;
-                native.setAttribute('hidden', '');
+                if (!native.hidden) native.hidden = true;
             }
         });
         matches = [];
@@ -372,7 +381,7 @@
     }
 
     function renderPopup(query, krRows = null, force = false) {
-        if (!enabled || !amqDropdownEnabled || !answerInput || !query.trim()) return hidePopup();
+        if (!enabled || !amqDropdownEnabled || !isAnswerInputActive() || !query.trim()) return hidePopup(true);
         const normalizedQuery = normalize(query);
         if (dismissedQuery && normalizedQuery === dismissedQuery) return hidePopup();
         if (!krRows) {
@@ -463,6 +472,7 @@
 
     function queueRender() {
         const serial = ++renderSerial;
+        if (!isAnswerInputActive()) return hidePopup(true);
         const query = answerInput?.value || '';
         // 입력을 모두 지우면 이전 문제의 AMQ 후보가 다시 노출되지 않도록 목록 전체를 닫는다.
         if (!query.trim()) {
@@ -827,12 +837,17 @@
                 requestAnimationFrame(() => {
                     scheduled = false;
                     bindInput();
-                    if (answerInput && !answerInput.value.trim()) hidePopup(true);
+                    if (!isAnswerInputActive() || !answerInput.value.trim()) hidePopup(true);
                     ensureMultipleChoiceObserver();
                     replaceMultipleChoice();
                 });
             });
-            observer.observe(document.body, { childList: true, subtree: true });
+            observer.observe(document.body, {
+                childList: true,
+                subtree: true,
+                attributes: true,
+                attributeFilter: ['class', 'style', 'hidden', 'disabled', 'readonly']
+            });
         }
         addEventListener('resize', positionPopup, { passive: true });
         document.addEventListener('mousedown', event => {
