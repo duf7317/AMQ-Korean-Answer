@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AMQ KR Helper
 // @namespace    amq-kr-helper
-// @version      1.9.7
+// @version      1.9.8
 // @description  AMQ 원래 입력을 유지하면서 한글/영문/로마자 별칭 검색을 보조합니다.
 // @match        https://animemusicquiz.com/*
 // @match        https://www.animemusicquiz.com/*
@@ -20,7 +20,7 @@
 (() => {
     'use strict';
 
-    const VERSION = '1.9.7';
+    const VERSION = '1.9.8';
     const DEFAULT_SHEET_URL = 'https://docs.google.com/spreadsheets/d/19-YDyMy__mPoP5Ozi7nPJ-A83XwsljODhhqmzuv1P2g/export?format=tsv&gid=0';
     const REFRESH_MS = 60_000;
     const MAX_KR_RESULTS = 50;
@@ -347,6 +347,16 @@
         return result;
     }
 
+    function scrollSelectionIntoView(list, element) {
+        if (!list || !element) return;
+        const itemTop = element.offsetTop;
+        const itemBottom = itemTop + element.offsetHeight;
+        const viewTop = list.scrollTop;
+        const viewBottom = viewTop + list.clientHeight;
+        if (itemTop < viewTop) list.scrollTop = itemTop;
+        else if (itemBottom > viewBottom) list.scrollTop = itemBottom - list.clientHeight;
+    }
+
     function renderPopup(query, krRows = null, force = false) {
         if (!enabled || !amqDropdownEnabled || !answerInput || !query.trim()) return hidePopup();
         const normalizedQuery = normalize(query);
@@ -398,6 +408,7 @@
         matches.forEach((candidate, index) => candidate.nativeElement?.setAttribute('aria-selected', selectedIndex === index ? 'true' : 'false'));
         list.hidden = false;
         list.removeAttribute('hidden');
+        if (selectedIndex >= 0) scrollSelectionIntoView(list, matches[selectedIndex]?.nativeElement);
         const signature = `${selectedIndex}|${matches.map(candidate => `${candidate.type}:${candidate.label}:${candidate.target}`).join('|')}`;
         lastRenderSignature = signature;
     }
