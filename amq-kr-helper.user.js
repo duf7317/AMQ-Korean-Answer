@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AMQ KR Helper
 // @namespace    amq-kr-helper
-// @version      1.10.4
+// @version      1.10.5
 // @description  AMQ 원래 입력을 유지하면서 한글/영문/로마자 별칭 검색을 보조합니다.
 // @match        https://animemusicquiz.com/*
 // @match        https://www.animemusicquiz.com/*
@@ -421,8 +421,6 @@
         matches = koreanQuery ? krCandidates : native.filter(candidate => candidate.nativeElement.style.display !== 'none').concat(krCandidates);
         if (!matches.length) return;
         if (selectedIndex >= matches.length) selectedIndex = -1;
-        // 한글 IME가 첫 방향키를 페이지에 전달하지 않는 환경을 위해 첫 KR 후보를 미리 선택한다.
-        if (koreanQuery && selectedIndex < 0) selectedIndex = 0;
         matches.forEach((candidate, index) => candidate.nativeElement?.setAttribute('aria-selected', selectedIndex === index ? 'true' : 'false'));
         list.hidden = false;
         list.removeAttribute('hidden');
@@ -472,6 +470,10 @@
         renderTimers = [];
         const query = answerInput?.value || '';
         if (!query.trim()) return hidePopup();
+        // 새 입력에 대한 선택 초기화는 예약 검색보다 먼저 끝내야 한다.
+        // 그렇지 않으면 사용자가 바로 누른 첫 방향키 선택이 24ms 뒤 다시 해제된다.
+        selectedIndex = -1;
+        selectionActivated = false;
         requestAnimationFrame(() => {
             if (serial !== renderSerial || answerInput?.value !== query) return;
             // AMQ 기본 후보를 먼저 읽어 기존 드롭다운과 같은 프레임에 표시한다.
@@ -482,8 +484,6 @@
             const current = answerInput.value;
             lastKrQuery = normalize(current);
             lastKrMatches = search(current); // 키 입력당 시트 전체 검색은 여기서 한 번만
-            selectedIndex = -1;
-            selectionActivated = false;
             renderPopup(current, lastKrMatches, true);
         }, 24));
     }
