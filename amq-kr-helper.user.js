@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AMQ KR Helper
 // @namespace    amq-kr-helper
-// @version      1.8.2
+// @version      1.8.3
 // @description  AMQ 원래 입력을 유지하면서 한글/영문/로마자 별칭 검색을 보조합니다.
 // @match        https://animemusicquiz.com/*
 // @match        https://www.animemusicquiz.com/*
@@ -20,7 +20,7 @@
 (() => {
     'use strict';
 
-    const VERSION = '1.8.2';
+    const VERSION = '1.8.3';
     const DEFAULT_SHEET_URL = 'https://docs.google.com/spreadsheets/d/19-YDyMy__mPoP5Ozi7nPJ-A83XwsljODhhqmzuv1P2g/export?format=tsv&gid=0';
     const REFRESH_MS = 60_000;
     const MAX_RESULTS = 8;
@@ -42,6 +42,10 @@
     let selectedIndex = -1;
     let bypassNextEnter = false;
     let renderSerial = 0;
+    let renderTimers = [];
+    let lastKrQuery = '';
+    let lastKrMatches = [];
+    let lastRenderSignature = '';
     let refreshTimer = null;
     let watchTimer = null;
     let observer = null;
@@ -121,12 +125,10 @@
         rows = prepareRows(rawRows);
     }
 
-    function scoreRow(row, query) {
-        const nq = normalize(query);
-        const cq = compact(query);
-        const qTokens = tokens(query);
+    function scoreRow(row, context) {
+        const { nq, cq, qTokens } = context;
         if (!nq || !cq) return null;
-        const allTokens = qTokens.every(token => row.search.includes(token) || row.compactSearch.includes(compact(token)));
+        const allTokens = qTokens.every(token => row.search.includes(token) || row.compactSearch.includes(token.replace(/\s/g, '')));
         const compactIncluded = row.compactSearch.includes(cq);
         if (!allTokens && !compactIncluded) return null;
         let tier = 3;
@@ -138,9 +140,18 @@
     }
 
     function search(query) {
-        return rows.map(row => scoreRow(row, query)).filter(Boolean)
-            .sort((a, b) => a.tier - b.tier || a.exact - b.exact || a.length - b.length || a.row.korean.localeCompare(b.row.korean, 'ko'))
-            .slice(0, MAX_RESULTS).map(result => result.row);
+        const nq = normalize(query);
+        const context = { nq, cq: nq.replace(/\s/g, ''), qTokens: nq.split(' ').filter(Boolean) };
+        const compare = (a, b) => a.tier - b.tier || a.exact - b.exact || a.length - b.length || a.row.korean.localeCompare(b.row.korean, 'ko');
+        const best = [];
+        for (const row of rows) {
+            const result = scoreRow(row, context);
+            if (!result) continue;
+            best.push(result);
+            best.sort(compare);
+            if (best.length > MAX_RESULTS) best.pop();
+        }
+        return best.map(result => result.row);
     }
 
     function exactKorean(query) {
@@ -206,6 +217,7 @@
         if (native) native.classList.remove('krh-native-hidden');
         matches = [];
         selectedIndex = -1;
+        lastRenderSignature = '';
     }
 
     function getNativeList() {
@@ -227,7 +239,7 @@
         }).filter(Boolean);
     }
 
-    function buildUnifiedMatches(query) {
+    function buildUnifiedMatches(query, krRows) {
         const result = [];
         const seen = new Set();
         for (const candidate of nativeCandidates()) {
@@ -236,7 +248,7 @@
             seen.add(`amq:${key}`);
             result.push(candidate);
         }
-        for (const row of search(query)) {
+        for (const row of krRows) {
             const target = preferredAnswer(row);
             const key = `${compact(row.korean)}:${compact(target)}`;
             if (!target || seen.has(`kr:${key}`)) continue;
@@ -246,14 +258,28 @@
         return result.slice(0, 15);
     }
 
-    function renderPopup(query) {
+    function renderPopup(query, krRows = null, force = false) {
         if (!enabled || !answerInput || !query.trim()) return hidePopup();
-        matches = buildUnifiedMatches(query);
+        const normalizedQuery = normalize(query);
+        if (!krRows) {
+            if (normalizedQuery !== lastKrQuery) {
+                lastKrQuery = normalizedQuery;
+                lastKrMatches = search(query);
+            }
+            krRows = lastKrMatches;
+        }
+        matches = buildUnifiedMatches(query, krRows);
         if (!matches.length) return hidePopup();
         ensurePopup();
         const native = getNativeList();
         if (native) native.classList.add('krh-native-hidden');
         if (selectedIndex < 0 || selectedIndex >= matches.length) selectedIndex = 0;
+        const signature = `${selectedIndex}|${matches.map(candidate => `${candidate.type}:${candidate.label}:${candidate.target}`).join('|')}`;
+        if (!force && signature === lastRenderSignature && popup?.style.display === 'block') {
+            positionPopup();
+            return;
+        }
+        lastRenderSignature = signature;
         popup.textContent = '';
         matches.forEach((candidate, index) => {
             const item = document.createElement('li');
@@ -290,6 +316,9 @@
         hidePopup();
         answerInput.value = value;
         dispatchNativeInput(answerInput);
+        renderSerial += 1;
+        renderTimers.forEach(clearTimeout);
+        renderTimers = [];
         bypassNextEnter = true;
         setTimeout(() => {
             answerInput.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true }));
@@ -305,13 +334,26 @@
 
     function queueRender() {
         const serial = ++renderSerial;
-        [0, 30, 90].forEach(delay => setTimeout(() => {
-            if (serial === renderSerial && answerInput?.value) renderPopup(answerInput.value);
-        }, delay));
+        renderTimers.forEach(clearTimeout);
+        renderTimers = [];
+        const query = answerInput?.value || '';
+        if (!query.trim()) return hidePopup();
+        renderTimers.push(setTimeout(() => {
+            if (serial !== renderSerial || !answerInput) return;
+            const current = answerInput.value;
+            lastKrQuery = normalize(current);
+            lastKrMatches = search(current); // 키 입력당 시트 전체 검색은 여기서 한 번만
+            selectedIndex = -1;
+            renderPopup(current, lastKrMatches, true);
+        }, 24));
+        renderTimers.push(setTimeout(() => {
+            if (serial !== renderSerial || !answerInput?.value) return;
+            // AMQ 후보가 비동기로 늦게 만들어져도 KR 검색은 다시 하지 않고 병합만 갱신한다.
+            renderPopup(answerInput.value, lastKrMatches);
+        }, 90));
     }
 
     function onInput() {
-        selectedIndex = -1;
         queueRender();
     }
 
@@ -325,7 +367,7 @@
             event.preventDefault();
             event.stopImmediatePropagation();
             selectedIndex = (selectedIndex + (event.key === 'ArrowDown' ? 1 : -1) + matches.length) % matches.length;
-            return renderPopup(answerInput.value);
+            return renderPopup(answerInput.value, lastKrMatches, true);
         }
         if (visible && event.key === 'Enter' && selectedIndex >= 0) {
             event.preventDefault();
@@ -442,6 +484,8 @@
             const prepared = prepareRows(parsed);
             if (prepared.length) {
                 rows = prepared;
+                lastKrQuery = '';
+                lastKrMatches = [];
                 saveValue(STORAGE.rows, parsed);
                 replaceMultipleChoice();
                 if (answerInput?.value) renderPopup(answerInput.value);
@@ -504,7 +548,7 @@
         replaceMultipleChoice();
         refreshSheet();
         if (!refreshTimer) refreshTimer = setInterval(refreshSheet, REFRESH_MS);
-        if (!watchTimer) watchTimer = setInterval(() => { ensureToggle(); bindInput(); replaceMultipleChoice(); }, 300);
+        if (!watchTimer) watchTimer = setInterval(() => { ensureToggle(); bindInput(); replaceMultipleChoice(); }, 1000);
         if (!observer) {
             let scheduled = false;
             observer = new MutationObserver(() => {
