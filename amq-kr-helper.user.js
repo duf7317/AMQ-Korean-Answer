@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AMQ KR Helper
 // @namespace    amq-kr-helper
-// @version      1.10.11
+// @version      1.10.12
 // @description  AMQ 원래 입력을 유지하면서 한글/영문/로마자 별칭 검색을 보조합니다.
 // @match        https://animemusicquiz.com/*
 // @match        https://www.animemusicquiz.com/*
@@ -53,6 +53,7 @@
     let refreshTimer = null;
     let watchTimer = null;
     let observer = null;
+    let answerStateObserver = null;
     let multipleChoiceObserver = null;
     let observedMultipleChoiceContainer = null;
     let multipleChoiceTimer = null;
@@ -613,6 +614,29 @@
         return null;
     }
 
+    function observeAnswerInputState() {
+        answerStateObserver?.disconnect();
+        if (!answerInput) return;
+        answerStateObserver = new MutationObserver(() => {
+            if (!isAnswerInputActive()) hidePopup(true);
+        });
+        const targets = new Set([
+            answerInput,
+            answerInput.closest('.awesomplete'),
+            answerInput.closest('#qpAnswerInputContainer'),
+            answerInput.parentElement
+        ].filter(Boolean));
+        let ancestor = answerInput.parentElement;
+        for (let depth = 0; ancestor && ancestor !== document.body && depth < 6; depth += 1) {
+            targets.add(ancestor);
+            ancestor = ancestor.parentElement;
+        }
+        targets.forEach(target => answerStateObserver.observe(target, {
+            attributes: true,
+            attributeFilter: ['class', 'style', 'hidden', 'disabled', 'readonly']
+        }));
+    }
+
     function bindInput() {
         const next = findAnswerInput();
         if (!next) return;
@@ -633,6 +657,7 @@
         answerInput.addEventListener('keydown', onKeyDown, true);
         answerInput.addEventListener('keyup', onKeyUp, true);
         answerInput.addEventListener('compositionend', onCompositionEnd);
+        observeAnswerInputState();
         observeNativeLists();
     }
 
@@ -869,9 +894,7 @@
             });
             observer.observe(document.body, {
                 childList: true,
-                subtree: true,
-                attributes: true,
-                attributeFilter: ['class', 'style', 'hidden', 'disabled', 'readonly']
+                subtree: true
             });
         }
         addEventListener('resize', positionPopup, { passive: true });
