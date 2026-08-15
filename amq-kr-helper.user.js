@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AMQ KR Helper
 // @namespace    amq-kr-helper
-// @version      1.10.8
+// @version      1.10.9
 // @description  AMQ 원래 입력을 유지하면서 한글/영문/로마자 별칭 검색을 보조합니다.
 // @match        https://animemusicquiz.com/*
 // @match        https://www.animemusicquiz.com/*
@@ -195,6 +195,8 @@
             #${POPUP_ID} .krh-target{display:block;margin-top:1px;color:#777;font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
             #${POPUP_ID} .krh-item:hover .krh-target,#${POPUP_ID} .krh-item.sel .krh-target{color:#e7f1fb}
             .awesomplete ul[role="listbox"] > li[data-krh="true"]{white-space:normal}
+            .awesomplete ul[role="listbox"].krh-korean-query > li:not([data-krh="true"]),
+            ul[role="listbox"].krh-korean-query > li:not([data-krh="true"]){display:none!important}
             #qpMultipleChoiceContainer .qpMultipleChoiceEntryTextContainer .qpMultipleChoiceEntryText{overflow:visible!important;white-space:normal!important;word-break:keep-all!important;line-height:1.15!important}
         `;
         document.head.appendChild(style);
@@ -233,6 +235,7 @@
     function hidePopup(closeNative = false) {
         if (popup) popup.style.display = 'none';
         getNativeLists().forEach(native => {
+            native.classList.remove('krh-korean-query');
             native.querySelectorAll('li[data-krh="true"]').forEach(item => item.remove());
             native.querySelectorAll('li[data-krh-native-hidden="true"]').forEach(item => {
                 item.style.removeProperty('display');
@@ -398,6 +401,7 @@
         lists.forEach(native => native.querySelectorAll('li[data-krh="true"]').forEach(item => item.remove()));
 
         const koreanQuery = hasHangul(query);
+        lists.forEach(nativeList => nativeList.classList.toggle('krh-korean-query', koreanQuery));
         const native = nativeCandidates();
         native.forEach(candidate => {
             if (koreanQuery) {
@@ -427,7 +431,10 @@
         });
 
         matches = koreanQuery ? krCandidates : native.filter(candidate => candidate.nativeElement.style.display !== 'none').concat(krCandidates);
-        if (!matches.length) return;
+        if (!matches.length) {
+            list.hidden = true;
+            return;
+        }
         if (selectedIndex >= matches.length) selectedIndex = -1;
         matches.forEach((candidate, index) => candidate.nativeElement?.setAttribute('aria-selected', selectedIndex === index ? 'true' : 'false'));
         list.hidden = false;
