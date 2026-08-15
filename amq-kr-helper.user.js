@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AMQ KR Helper
 // @namespace    amq-kr-helper
-// @version      1.10.13
+// @version      1.10.14
 // @description  AMQ 원래 입력을 유지하면서 한글/영문/로마자 별칭 검색을 보조합니다.
 // @match        https://animemusicquiz.com/*
 // @match        https://www.animemusicquiz.com/*
@@ -20,7 +20,7 @@
 (() => {
     'use strict';
 
-    const VERSION = '1.10.2';
+    const VERSION = '1.10.14';
     const DEFAULT_SHEET_URL = 'https://docs.google.com/spreadsheets/d/19-YDyMy__mPoP5Ozi7nPJ-A83XwsljODhhqmzuv1P2g/export?format=tsv&gid=0';
     const REFRESH_MS = 60_000;
     const MAX_KR_RESULTS = 50;
@@ -88,6 +88,28 @@
     function hasHangul(value) { return /[ㄱ-ㅎㅏ-ㅣ가-힣]/.test(value); }
     function tokens(value) { return normalize(value).split(' ').filter(Boolean); }
 
+    // 검색어에 -, +, ~가 들어간 경우 이 문자는 AMQ 검색 명령으로 해석하지 않고
+    // KoreanAnswer 열에 실제로 존재하는 문자 그대로 검색한다.
+    // 예: -hen -> Megami-hen 매칭, -gl -> GLORY LINE 불일치.
+    function literalSearchText(value) {
+        return String(value || '')
+            .normalize('NFKC')
+            .toLocaleLowerCase()
+            .replace(/[‐‑‒–—―]/g, '-')
+            .replace(/\s+/g, ' ')
+            .trim();
+    }
+
+    function usesLiteralSpecialSearch(value) {
+        return /[-+~]/.test(String(value || ''));
+    }
+
+    function searchCacheKey(value) {
+        return usesLiteralSpecialSearch(value)
+            ? `literal:${literalSearchText(value)}`
+            : `normal:${normalize(value)}`;
+    }
+
     function rowValue(raw, names) {
         const wanted = new Set(names.map(name => name.toLowerCase().replace(/[^a-z가-힣]/g, '')));
         for (const [key, value] of Object.entries(raw || {})) {
@@ -104,6 +126,7 @@
         if (!korean || (!english && !romaji)) return null;
         const item = { id: index, korean, english, romaji };
         item.nKorean = normalize(korean);
+        item.lKorean = literalSearchText(korean);
         item.nEnglish = normalize(english);
         item.nRomaji = normalize(romaji);
         item.cKorean = compact(korean);
@@ -134,10 +157,26 @@
     }
 
     function scoreRow(row, context) {
-        const { nq, cq, qTokens } = context;
+        const { nq, cq, qTokens, literalQuery } = context;
         if (!nq || !cq) return null;
+
+        // -, +, ~가 검색어에 포함되면 해당 문자를 삭제/공백화하지 않고
+        // KoreanAnswer 실제 문자열에서 그대로 포함되는지 검사한다.
+        if (literalQuery) {
+            const haystack = row.lKorean || literalSearchText(row.korean);
+            if (!haystack.includes(literalQuery)) return null;
+            const exact = haystack === literalQuery;
+            const tier = haystack.startsWith(literalQuery) ? 0 : 1;
+            return {
+                row,
+                tier,
+                exact: exact ? 0 : 1,
+                length: Math.min(row.korean.length, row.english.length || Infinity, row.romaji.length || Infinity)
+            };
+        }
+
+        // 일반 검색은 기존 v1.10.13 동작을 그대로 유지한다.
         // KR 후보는 KoreanAnswer 열의 실제 문자열만 검색한다.
-        // 따라서 tennis는 테니스와 매칭되지 않지만, KoreanAnswer에 영문으로 적힌 Max Heart는 매칭된다.
         const allTokens = qTokens.every(token => row.nKorean.includes(token) || row.cKorean.includes(token.replace(/\s/g, '')));
         const compactIncluded = row.cKorean.includes(cq);
         if (!allTokens && !compactIncluded) return null;
@@ -150,7 +189,13 @@
 
     function search(query) {
         const nq = normalize(query);
-        const context = { nq, cq: nq.replace(/\s/g, ''), qTokens: nq.split(' ').filter(Boolean) };
+        const literalQuery = usesLiteralSpecialSearch(query) ? literalSearchText(query) : '';
+        const context = {
+            nq,
+            cq: nq.replace(/\s/g, ''),
+            qTokens: nq.split(' ').filter(Boolean),
+            literalQuery
+        };
         const compare = (a, b) => a.tier - b.tier || a.exact - b.exact || a.length - b.length || a.row.korean.localeCompare(b.row.korean, 'ko');
         const best = [];
         for (const row of rows) {
@@ -319,7 +364,7 @@
                 if (!mutations.some(mutationContainsNativeCandidate)) return;
                 if (!enabled || !amqDropdownEnabled || !answerInput?.value) return;
                 const query = answerInput.value;
-                const cachedKr = normalize(query) === lastKrQuery ? lastKrMatches : [];
+                const cachedKr = searchCacheKey(query) === lastKrQuery ? lastKrMatches : [];
                 // AMQ가 영어/Romaji 후보를 만든 바로 그 시점에 통합 목록을 갱신한다.
                 queueMicrotask(() => {
                     if (answerInput?.value === query) renderPopup(query, cachedKr, true);
@@ -386,11 +431,11 @@
 
     function renderPopup(query, krRows = null, force = false) {
         if (!enabled || !amqDropdownEnabled || !isAnswerInputActive() || !query.trim()) return hidePopup(true);
-        const normalizedQuery = normalize(query);
-        if (dismissedQuery && normalizedQuery === dismissedQuery) return hidePopup();
+        const queryKey = searchCacheKey(query);
+        if (dismissedQuery && queryKey === dismissedQuery) return hidePopup();
         if (!krRows) {
-            if (normalizedQuery !== lastKrQuery) {
-                lastKrQuery = normalizedQuery;
+            if (queryKey !== lastKrQuery) {
+                lastKrQuery = queryKey;
                 lastKrMatches = search(query);
             }
             krRows = lastKrMatches;
@@ -462,7 +507,7 @@
         dispatchNativeInput(answerInput);
         // 변환된 영문 값을 넣는 input 이벤트가 AMQ 자동완성을 다시 열 수 있으므로
         // 이 제출값은 새 사용자 입력이 생길 때까지 닫힌 상태로 기억한다.
-        dismissedQuery = normalize(value);
+        dismissedQuery = searchCacheKey(value);
         renderSerial += 1;
         bypassNextEnter = true;
         setTimeout(() => {
@@ -493,7 +538,7 @@
         }
         selectedIndex = -1;
         selectionActivated = false;
-        lastKrQuery = normalize(query);
+        lastKrQuery = searchCacheKey(query);
         lastKrMatches = search(query);
         // 고정 지연 없이 현재 후보를 즉시 표시한다.
         renderPopup(query, lastKrMatches, true);
@@ -573,13 +618,14 @@
             event.stopImmediatePropagation();
             return choose(selectedIndex);
         }
-        if (visible && event.key === 'Escape' && hasHangul(answerInput?.value || '')) {
-            event.preventDefault();
-            event.stopImmediatePropagation();
-            dismissedQuery = normalize(answerInput.value);
+        if (visible && event.key === 'Escape') {
+            // KR Helper/통합 자동완성만 닫고 Escape 이벤트 자체는 막지 않는다.
+            // 따라서 AMQ의 "다른 플레이어 답 보기" 같은 원래 ESC 동작은 그대로 실행된다.
+            dismissedQuery = searchCacheKey(answerInput.value);
             renderSerial += 1;
             pendingCompositionArrow = 0;
-            return hidePopup(true);
+            hidePopup(true);
+            return;
         }
         if (event.key !== 'Enter' || event.ctrlKey || event.altKey || event.metaKey || event.isComposing) return;
         const query = answerInput.value.trim();
