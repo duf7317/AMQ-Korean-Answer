@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AMQ KR Helper
 // @namespace    amq-kr-helper
-// @version      1.10.6
+// @version      1.10.7
 // @description  AMQ 원래 입력을 유지하면서 한글/영문/로마자 별칭 검색을 보조합니다.
 // @match        https://animemusicquiz.com/*
 // @match        https://www.animemusicquiz.com/*
@@ -464,7 +464,14 @@
     function queueRender() {
         const serial = ++renderSerial;
         const query = answerInput?.value || '';
-        if (!query.trim()) return hidePopup();
+        // 입력을 모두 지우면 이전 문제의 AMQ 후보가 다시 노출되지 않도록 목록 전체를 닫는다.
+        if (!query.trim()) {
+            hidePopup(true);
+            requestAnimationFrame(() => {
+                if (serial === renderSerial && !answerInput?.value.trim()) hidePopup(true);
+            });
+            return;
+        }
         selectedIndex = -1;
         selectionActivated = false;
         lastKrQuery = normalize(query);
@@ -817,7 +824,13 @@
                 mutations.forEach(mutation => mutation.addedNodes.forEach(detectDropdownCommandState));
                 if (scheduled) return;
                 scheduled = true;
-                requestAnimationFrame(() => { scheduled = false; bindInput(); ensureMultipleChoiceObserver(); replaceMultipleChoice(); });
+                requestAnimationFrame(() => {
+                    scheduled = false;
+                    bindInput();
+                    if (answerInput && !answerInput.value.trim()) hidePopup(true);
+                    ensureMultipleChoiceObserver();
+                    replaceMultipleChoice();
+                });
             });
             observer.observe(document.body, { childList: true, subtree: true });
         }
