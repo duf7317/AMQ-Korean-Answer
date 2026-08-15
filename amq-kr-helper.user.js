@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AMQ KR Helper
 // @namespace    amq-kr-helper
-// @version      1.9.2
+// @version      1.9.3
 // @description  AMQ 원래 입력을 유지하면서 한글/영문/로마자 별칭 검색을 보조합니다.
 // @match        https://animemusicquiz.com/*
 // @match        https://www.animemusicquiz.com/*
@@ -20,7 +20,7 @@
 (() => {
     'use strict';
 
-    const VERSION = '1.9.2';
+    const VERSION = '1.9.3';
     const DEFAULT_SHEET_URL = 'https://docs.google.com/spreadsheets/d/19-YDyMy__mPoP5Ozi7nPJ-A83XwsljODhhqmzuv1P2g/export?format=tsv&gid=0';
     const REFRESH_MS = 60_000;
     const MAX_KR_RESULTS = 50;
@@ -130,14 +130,15 @@
     function scoreRow(row, context) {
         const { nq, cq, qTokens } = context;
         if (!nq || !cq) return null;
-        const allTokens = qTokens.every(token => row.search.includes(token) || row.compactSearch.includes(token.replace(/\s/g, '')));
-        const compactIncluded = row.compactSearch.includes(cq);
+        // KR 후보는 KoreanAnswer 열의 실제 문자열만 검색한다.
+        // 따라서 tennis는 테니스와 매칭되지 않지만, KoreanAnswer에 영문으로 적힌 Max Heart는 매칭된다.
+        const allTokens = qTokens.every(token => row.nKorean.includes(token) || row.cKorean.includes(token.replace(/\s/g, '')));
+        const compactIncluded = row.cKorean.includes(cq);
         if (!allTokens && !compactIncluded) return null;
-        let tier = 3;
+        let tier = 2;
         if (row.nKorean.startsWith(nq) || row.cKorean.startsWith(cq)) tier = 0;
-        else if ([row.nEnglish, row.nRomaji].some(v => v && v.startsWith(nq)) || [row.cEnglish, row.cRomaji].some(v => v && v.startsWith(cq))) tier = 1;
-        else if (allTokens) tier = 2;
-        const exact = [row.nKorean, row.nEnglish, row.nRomaji, row.cKorean, row.cEnglish, row.cRomaji].includes(nq) || [row.cKorean, row.cEnglish, row.cRomaji].includes(cq);
+        else if (allTokens) tier = 1;
+        const exact = row.nKorean === nq || row.cKorean === cq;
         return { row, tier, exact: exact ? 0 : 1, length: Math.min(row.korean.length, row.english.length || Infinity, row.romaji.length || Infinity) };
     }
 
