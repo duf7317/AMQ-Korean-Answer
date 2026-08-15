@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AMQ KR Helper
 // @namespace    amq-kr-helper
-// @version      1.9.1
+// @version      1.9.2
 // @description  AMQ 원래 입력을 유지하면서 한글/영문/로마자 별칭 검색을 보조합니다.
 // @match        https://animemusicquiz.com/*
 // @match        https://www.animemusicquiz.com/*
@@ -20,7 +20,7 @@
 (() => {
     'use strict';
 
-    const VERSION = '1.9.1';
+    const VERSION = '1.9.2';
     const DEFAULT_SHEET_URL = 'https://docs.google.com/spreadsheets/d/19-YDyMy__mPoP5Ozi7nPJ-A83XwsljODhhqmzuv1P2g/export?format=tsv&gid=0';
     const REFRESH_MS = 60_000;
     const MAX_KR_RESULTS = 50;
@@ -47,6 +47,7 @@
     let lastKrMatches = [];
     let lastRenderSignature = '';
     let amqDropdownEnabled = sessionStorage.getItem('amqKrHelperNativeDropdownEnabled') !== 'false';
+    const nativeListObservers = new WeakMap();
     let refreshTimer = null;
     let watchTimer = null;
     let observer = null;
@@ -277,6 +278,33 @@
         return getNativeLists()[0] || null;
     }
 
+    function mutationContainsNativeCandidate(mutation) {
+        const changedNodes = [...mutation.addedNodes, ...mutation.removedNodes];
+        return changedNodes.some(node => {
+            if (!(node instanceof Element)) return String(node.textContent || '').trim().length > 0;
+            if (node.matches('li[data-krh="true"]') || node.closest('li[data-krh="true"]')) return false;
+            return node.matches('li') || !!node.querySelector('li:not([data-krh="true"])');
+        });
+    }
+
+    function observeNativeLists() {
+        getNativeLists().forEach(list => {
+            if (nativeListObservers.has(list)) return;
+            const listObserver = new MutationObserver(mutations => {
+                if (!mutations.some(mutationContainsNativeCandidate)) return;
+                if (!enabled || !amqDropdownEnabled || !answerInput?.value) return;
+                const query = answerInput.value;
+                const cachedKr = normalize(query) === lastKrQuery ? lastKrMatches : [];
+                // AMQ가 영어/Romaji 후보를 만든 바로 그 시점에 통합 목록을 갱신한다.
+                queueMicrotask(() => {
+                    if (answerInput?.value === query) renderPopup(query, cachedKr, true);
+                });
+            });
+            listObserver.observe(list, { childList: true, subtree: true });
+            nativeListObservers.set(list, listObserver);
+        });
+    }
+
     function nativeCandidates() {
         const output = [];
         const seen = new Set();
@@ -327,6 +355,7 @@
         const lists = getNativeLists();
         const list = lists[0];
         if (!list) return;
+        observeNativeLists();
         lists.forEach(native => native.querySelectorAll('li[data-krh="true"]').forEach(item => item.remove()));
 
         const koreanQuery = hasHangul(query);
@@ -404,6 +433,11 @@
         renderTimers = [];
         const query = answerInput?.value || '';
         if (!query.trim()) return hidePopup();
+        requestAnimationFrame(() => {
+            if (serial !== renderSerial || answerInput?.value !== query) return;
+            // AMQ 기본 후보를 먼저 읽어 기존 드롭다운과 같은 프레임에 표시한다.
+            renderPopup(query, normalize(query) === lastKrQuery ? lastKrMatches : [], true);
+        });
         renderTimers.push(setTimeout(() => {
             if (serial !== renderSerial || !answerInput) return;
             const current = answerInput.value;
@@ -412,11 +446,6 @@
             selectedIndex = -1;
             renderPopup(current, lastKrMatches, true);
         }, 24));
-        renderTimers.push(setTimeout(() => {
-            if (serial !== renderSerial || !answerInput?.value) return;
-            // AMQ 후보가 비동기로 늦게 만들어져도 KR 검색은 다시 하지 않고 병합만 갱신한다.
-            renderPopup(answerInput.value, lastKrMatches);
-        }, 90));
     }
 
     function onInput() {
@@ -469,7 +498,11 @@
 
     function bindInput() {
         const next = findAnswerInput();
-        if (!next || next === answerInput) return;
+        if (!next) return;
+        if (next === answerInput) {
+            observeNativeLists();
+            return;
+        }
         if (answerInput) {
             answerInput.removeEventListener('input', onInput);
             answerInput.removeEventListener('keydown', onKeyDown, true);
@@ -479,6 +512,7 @@
         answerInput.closest('.awesomplete')?.classList.add('krh-answer-wrapper');
         answerInput.addEventListener('input', onInput);
         answerInput.addEventListener('keydown', onKeyDown, true);
+        observeNativeLists();
     }
 
     function replaceMultipleChoice() {
