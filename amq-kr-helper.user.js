@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AMQ KR Helper
 // @namespace    amq-kr-helper
-// @version      1.9.6
+// @version      1.9.7
 // @description  AMQ 원래 입력을 유지하면서 한글/영문/로마자 별칭 검색을 보조합니다.
 // @match        https://animemusicquiz.com/*
 // @match        https://www.animemusicquiz.com/*
@@ -20,7 +20,7 @@
 (() => {
     'use strict';
 
-    const VERSION = '1.9.6';
+    const VERSION = '1.9.7';
     const DEFAULT_SHEET_URL = 'https://docs.google.com/spreadsheets/d/19-YDyMy__mPoP5Ozi7nPJ-A83XwsljODhhqmzuv1P2g/export?format=tsv&gid=0';
     const REFRESH_MS = 60_000;
     const MAX_KR_RESULTS = 50;
@@ -525,9 +525,10 @@
                 if (element.dataset.krhApplied !== 'true') return;
                 if (element.textContent.trim() === element.dataset.krhKorean) {
                     element.textContent = element.dataset.krhOriginalText || element.textContent;
+                    element.style.fontSize = element.dataset.krhOriginalFontSize || '';
+                    element.title = element.dataset.krhOriginalTitle || '';
                 }
-                element.style.fontSize = element.dataset.krhOriginalFontSize || '';
-                element.title = element.dataset.krhOriginalTitle || '';
+                // 내용이 이미 달라졌다면 AMQ가 새 문제의 문구와 크기를 적용한 상태이므로 건드리지 않는다.
                 delete element.dataset.krhApplied;
                 delete element.dataset.krhKorean;
                 delete element.dataset.krhOriginalText;
@@ -563,8 +564,7 @@
             if (element.dataset.krhApplied === 'true') {
                 if (element.textContent.trim() === element.dataset.krhKorean) return;
                 // AMQ가 같은 요소를 다음 문제의 새 선택지로 재사용한 경우 이전 표시를 폐기한다.
-                element.style.fontSize = element.dataset.krhOriginalFontSize || '';
-                element.title = element.dataset.krhOriginalTitle || '';
+                // 이 시점의 글자 크기와 툴팁은 새 선택지에 맞춰 AMQ가 계산한 값이므로 유지한다.
                 delete element.dataset.krhApplied;
                 delete element.dataset.krhKorean;
                 delete element.dataset.krhOriginalText;
