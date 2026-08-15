@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AMQ KR Helper
 // @namespace    amq-kr-helper
-// @version      1.8.3
+// @version      1.8.4
 // @description  AMQ 원래 입력을 유지하면서 한글/영문/로마자 별칭 검색을 보조합니다.
 // @match        https://animemusicquiz.com/*
 // @match        https://www.animemusicquiz.com/*
@@ -20,7 +20,7 @@
 (() => {
     'use strict';
 
-    const VERSION = '1.8.3';
+    const VERSION = '1.8.4';
     const DEFAULT_SHEET_URL = 'https://docs.google.com/spreadsheets/d/19-YDyMy__mPoP5Ozi7nPJ-A83XwsljODhhqmzuv1P2g/export?format=tsv&gid=0';
     const REFRESH_MS = 60_000;
     const MAX_RESULTS = 8;
@@ -180,13 +180,14 @@
         const style = document.createElement('style');
         style.id = STYLE_ID;
         style.textContent = `
-            #${POPUP_ID}{position:fixed;z-index:2147483646;display:none;margin:0;padding:0;max-height:260px;overflow-y:auto;overflow-x:hidden;list-style:none;background:#fff;border:1px solid rgba(0,0,0,.3);border-radius:0 0 4px 4px;box-shadow:0 2px 4px rgba(0,0,0,.2);color:#333;font:14px/1.35 Arial,sans-serif;text-align:left}
+            #${POPUP_ID}{position:fixed;z-index:2147483646;display:none;box-sizing:border-box;margin:0;padding:0;max-height:260px;overflow-y:auto;overflow-x:hidden;list-style:none;background:#fff;border:1px solid rgba(0,0,0,.3);border-radius:0 0 4px 4px;box-shadow:0 2px 4px rgba(0,0,0,.2);color:#333;font:14px/1.35 Arial,sans-serif;text-align:left}
             #${POPUP_ID} .krh-item{display:block;margin:0;padding:6px 9px;cursor:pointer;border:0;white-space:normal;color:#333;background:#fff}
             #${POPUP_ID} .krh-item:hover,#${POPUP_ID} .krh-item.sel{background:#3b78b4;color:#fff}
             #${POPUP_ID} .krh-title{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
             #${POPUP_ID} .krh-target{display:block;margin-top:1px;color:#777;font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
             #${POPUP_ID} .krh-item:hover .krh-target,#${POPUP_ID} .krh-item.sel .krh-target{color:#e7f1fb}
-            .awesomplete ul.krh-native-hidden{visibility:hidden!important;pointer-events:none!important}
+            .awesomplete.krh-answer-wrapper > ul[role="listbox"]{display:none!important;visibility:hidden!important;pointer-events:none!important}
+            ul.krh-native-hidden{display:none!important;visibility:hidden!important;pointer-events:none!important}
         `;
         document.head.appendChild(style);
     }
@@ -206,37 +207,65 @@
     function positionPopup() {
         if (!answerInput || !popup) return;
         const rect = answerInput.getBoundingClientRect();
-        popup.style.left = `${Math.max(8, Math.min(rect.left, innerWidth - Math.min(420, innerWidth - 16) - 8))}px`;
+        popup.style.left = `${rect.left}px`;
         popup.style.top = `${Math.min(innerHeight - popup.offsetHeight - 8, rect.bottom + 5)}px`;
-        popup.style.width = `${Math.min(Math.max(rect.width, 280), 420)}px`;
+        popup.style.width = `${rect.width}px`;
     }
 
     function hidePopup() {
         if (popup) popup.style.display = 'none';
-        const native = getNativeList();
-        if (native) native.classList.remove('krh-native-hidden');
+        getNativeLists().forEach(native => native.classList.remove('krh-native-hidden'));
         matches = [];
         selectedIndex = -1;
         lastRenderSignature = '';
     }
 
+    function getNativeLists() {
+        if (!answerInput) return [];
+        const found = new Set();
+        const add = list => {
+            if (list && list !== popup && list.id !== POPUP_ID) found.add(list);
+        };
+        const ownerId = answerInput.getAttribute('aria-owns') || answerInput.getAttribute('aria-controls');
+        if (ownerId) add(document.getElementById(ownerId));
+        answerInput.closest('.awesomplete')?.querySelectorAll('ul').forEach(add);
+        answerInput.parentElement?.querySelectorAll(':scope > ul, :scope > .awesomplete ul').forEach(add);
+        document.querySelectorAll('.awesomplete ul[role="listbox"]').forEach(list => {
+            const wrapper = list.closest('.awesomplete');
+            const input = wrapper?.querySelector('input');
+            if (input === answerInput) add(list);
+        });
+        // AMQ 정답창용 Awesomplete 목록이 문서의 다른 위치에 생성되는 버전도 지원한다.
+        if (!found.size) {
+            const lists = Array.from(document.querySelectorAll('.awesomplete ul[role="listbox"], ul[role="listbox"]'))
+                .filter(list => list !== popup && list.id !== POPUP_ID);
+            const visible = lists.filter(list => {
+                const rect = list.getBoundingClientRect();
+                const inputRect = answerInput.getBoundingClientRect();
+                return Math.abs(rect.left - inputRect.left) < 20 || Math.abs(rect.top - inputRect.bottom) < 40;
+            });
+            (visible.length ? visible : lists.length === 1 ? lists : []).forEach(add);
+        }
+        return Array.from(found);
+    }
+
     function getNativeList() {
-        if (!answerInput) return null;
-        const own = answerInput.closest('.awesomplete')?.querySelector('ul[role="listbox"]');
-        if (own) return own;
-        return Array.from(document.querySelectorAll('.awesomplete ul[role="listbox"]')).find(list => {
-            const input = list.closest('.awesomplete')?.querySelector('input');
-            return input === answerInput;
-        }) || null;
+        return getNativeLists()[0] || null;
     }
 
     function nativeCandidates() {
-        const list = getNativeList();
-        if (!list) return [];
-        return Array.from(list.querySelectorAll('li')).map((element, index) => {
-            const label = (element.getAttribute('data-value') || element.textContent || '').trim();
-            return label ? { type: 'amq', label, target: label, nativeElement: element, order: index } : null;
-        }).filter(Boolean);
+        const output = [];
+        const seen = new Set();
+        getNativeLists().forEach(list => {
+            Array.from(list.querySelectorAll('li')).forEach((element, index) => {
+                const label = (element.getAttribute('data-value') || element.textContent || '').trim();
+                const key = compact(label);
+                if (!label || !key || seen.has(key)) return;
+                seen.add(key);
+                output.push({ type: 'amq', label, target: label, nativeElement: element, order: index });
+            });
+        });
+        return output;
     }
 
     function buildUnifiedMatches(query, krRows) {
@@ -271,8 +300,7 @@
         matches = buildUnifiedMatches(query, krRows);
         if (!matches.length) return hidePopup();
         ensurePopup();
-        const native = getNativeList();
-        if (native) native.classList.add('krh-native-hidden');
+        getNativeLists().forEach(native => native.classList.add('krh-native-hidden'));
         if (selectedIndex < 0 || selectedIndex >= matches.length) selectedIndex = 0;
         const signature = `${selectedIndex}|${matches.map(candidate => `${candidate.type}:${candidate.label}:${candidate.target}`).join('|')}`;
         if (!force && signature === lastRenderSignature && popup?.style.display === 'block') {
@@ -403,8 +431,10 @@
         if (answerInput) {
             answerInput.removeEventListener('input', onInput);
             answerInput.removeEventListener('keydown', onKeyDown, true);
+            answerInput.closest('.awesomplete')?.classList.remove('krh-answer-wrapper');
         }
         answerInput = next;
+        answerInput.closest('.awesomplete')?.classList.add('krh-answer-wrapper');
         answerInput.addEventListener('input', onInput);
         answerInput.addEventListener('keydown', onKeyDown, true);
     }
