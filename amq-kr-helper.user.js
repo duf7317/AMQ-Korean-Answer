@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AMQ KR Helper
 // @namespace    amq-kr-helper
-// @version      1.10.5
+// @version      1.10.6
 // @description  AMQ 원래 입력을 유지하면서 한글/영문/로마자 별칭 검색을 보조합니다.
 // @match        https://animemusicquiz.com/*
 // @match        https://www.animemusicquiz.com/*
@@ -44,7 +44,6 @@
     let dismissedQuery = '';
     let bypassNextEnter = false;
     let renderSerial = 0;
-    let renderTimers = [];
     let lastKrQuery = '';
     let lastKrMatches = [];
     let lastRenderSignature = '';
@@ -447,8 +446,6 @@
         // 이 제출값은 새 사용자 입력이 생길 때까지 닫힌 상태로 기억한다.
         dismissedQuery = normalize(value);
         renderSerial += 1;
-        renderTimers.forEach(clearTimeout);
-        renderTimers = [];
         bypassNextEnter = true;
         setTimeout(() => {
             answerInput.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true }));
@@ -466,26 +463,19 @@
 
     function queueRender() {
         const serial = ++renderSerial;
-        renderTimers.forEach(clearTimeout);
-        renderTimers = [];
         const query = answerInput?.value || '';
         if (!query.trim()) return hidePopup();
-        // 새 입력에 대한 선택 초기화는 예약 검색보다 먼저 끝내야 한다.
-        // 그렇지 않으면 사용자가 바로 누른 첫 방향키 선택이 24ms 뒤 다시 해제된다.
         selectedIndex = -1;
         selectionActivated = false;
+        lastKrQuery = normalize(query);
+        lastKrMatches = search(query);
+        // 고정 지연 없이 현재 후보를 즉시 표시한다.
+        renderPopup(query, lastKrMatches, true);
         requestAnimationFrame(() => {
             if (serial !== renderSerial || answerInput?.value !== query) return;
-            // AMQ 기본 후보를 먼저 읽어 기존 드롭다운과 같은 프레임에 표시한다.
-            renderPopup(query, normalize(query) === lastKrQuery ? lastKrMatches : [], true);
+            // AMQ가 같은 입력에서 만든 기본 후보까지 한 번 더 합친다.
+            renderPopup(query, lastKrMatches, true);
         });
-        renderTimers.push(setTimeout(() => {
-            if (serial !== renderSerial || !answerInput) return;
-            const current = answerInput.value;
-            lastKrQuery = normalize(current);
-            lastKrMatches = search(current); // 키 입력당 시트 전체 검색은 여기서 한 번만
-            renderPopup(current, lastKrMatches, true);
-        }, 24));
     }
 
     function onInput() {
@@ -560,8 +550,6 @@
             event.stopImmediatePropagation();
             dismissedQuery = normalize(answerInput.value);
             renderSerial += 1;
-            renderTimers.forEach(clearTimeout);
-            renderTimers = [];
             pendingCompositionArrow = 0;
             return hidePopup(true);
         }
