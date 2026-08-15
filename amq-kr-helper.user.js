@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AMQ KR Helper
 // @namespace    amq-kr-helper
-// @version      1.9.9
+// @version      1.10.0
 // @description  AMQ 원래 입력을 유지하면서 한글/영문/로마자 별칭 검색을 보조합니다.
 // @match        https://animemusicquiz.com/*
 // @match        https://www.animemusicquiz.com/*
@@ -20,7 +20,7 @@
 (() => {
     'use strict';
 
-    const VERSION = '1.9.9';
+    const VERSION = '1.10.0';
     const DEFAULT_SHEET_URL = 'https://docs.google.com/spreadsheets/d/19-YDyMy__mPoP5Ozi7nPJ-A83XwsljODhhqmzuv1P2g/export?format=tsv&gid=0';
     const REFRESH_MS = 60_000;
     const MAX_KR_RESULTS = 50;
@@ -476,14 +476,25 @@
         queueRender();
     }
 
+    function onCompositionEnd() {
+        if (!enabled || !amqDropdownEnabled) return;
+        queueRender();
+    }
+
     function onKeyDown(event) {
         if (bypassNextEnter && event.key === 'Enter') {
             bypassNextEnter = false;
             return;
         }
         if (!amqDropdownEnabled && hasHangul(answerInput?.value || '')) return;
-        const nativeList = getNativeList();
-        const visible = !!nativeList && !nativeList.hidden && matches.length > 0;
+        let nativeList = getNativeList();
+        let visible = !!nativeList && !nativeList.hidden && matches.length > 0;
+        if (!visible && !event.isComposing && hasHangul(answerInput?.value || '') && (event.key === 'ArrowDown' || event.key === 'ArrowUp')) {
+            // 느린 환경에서는 첫 방향키가 목록 열기에만 소비되지 않도록 KR 후보를 즉시 확정한다.
+            renderPopup(answerInput.value, null, true);
+            nativeList = getNativeList();
+            visible = !!nativeList && !nativeList.hidden && matches.length > 0;
+        }
         if (visible && (event.key === 'ArrowDown' || event.key === 'ArrowUp')) {
             event.preventDefault();
             event.stopImmediatePropagation();
@@ -531,12 +542,14 @@
         if (answerInput) {
             answerInput.removeEventListener('input', onInput);
             answerInput.removeEventListener('keydown', onKeyDown, true);
+            answerInput.removeEventListener('compositionend', onCompositionEnd);
             answerInput.closest('.awesomplete')?.classList.remove('krh-answer-wrapper');
         }
         answerInput = next;
         answerInput.closest('.awesomplete')?.classList.add('krh-answer-wrapper');
         answerInput.addEventListener('input', onInput);
         answerInput.addEventListener('keydown', onKeyDown, true);
+        answerInput.addEventListener('compositionend', onCompositionEnd);
         observeNativeLists();
     }
 
