@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AMQ KR Helper
 // @namespace    amq-kr-helper
-// @version      1.7.1
+// @version      1.8.0
 // @description  AMQ 원래 입력을 유지하면서 한글/영문/로마자 별칭 검색을 보조합니다.
 // @match        https://animemusicquiz.com/*
 // @match        https://www.animemusicquiz.com/*
@@ -20,7 +20,7 @@
 (() => {
     'use strict';
 
-    const VERSION = '1.7.1';
+    const VERSION = '1.8.0';
     const DEFAULT_SHEET_URL = 'https://docs.google.com/spreadsheets/d/19-YDyMy__mPoP5Ozi7nPJ-A83XwsljODhhqmzuv1P2g/export?format=tsv&gid=0';
     const REFRESH_MS = 60_000;
     const MAX_RESULTS = 8;
@@ -40,7 +40,8 @@
     let popup = null;
     let matches = [];
     let selectedIndex = -1;
-    let krKeyboardMode = false;
+    let bypassNextEnter = false;
+    let renderSerial = 0;
     let refreshTimer = null;
     let watchTimer = null;
     let observer = null;
@@ -105,9 +106,11 @@
         const result = [];
         (Array.isArray(rawRows) ? rawRows : []).forEach((raw, sourceIndex) => {
             const koreanRaw = String(rowValue(raw, ['KoreanAnswer', 'Korean', '한글']));
+            const english = rowValue(raw, ['EnglishAnswer', 'EnglishAnsawer', 'English', '영어']);
+            const romaji = rowValue(raw, ['RomajiAnswer', 'Romaji', 'Romanji', '로마자']);
             const aliases = koreanRaw.split(',').map(value => value.trim()).filter(Boolean);
             (aliases.length ? aliases : ['']).forEach((korean, aliasIndex) => {
-                const item = prepareRow({ ...raw, KoreanAnswer: korean }, `${sourceIndex}:${aliasIndex}`);
+                const item = prepareRow({ KoreanAnswer: korean, EnglishAnswer: english, RomajiAnswer: romaji }, `${sourceIndex}:${aliasIndex}`);
                 if (item) result.push(item);
             });
         });
@@ -173,6 +176,9 @@
             #${POPUP_ID} .krh-item:hover,#${POPUP_ID} .krh-item.sel{background:#315674}
             #${POPUP_ID} .krh-ko{font-weight:700;color:#fff}
             #${POPUP_ID} .krh-target{margin-top:2px;color:#b8c8d8;font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+            #${POPUP_ID} .krh-badge{display:inline-block;min-width:34px;margin-right:6px;padding:1px 4px;border-radius:3px;background:#3c4654;color:#dce6f2;font-size:10px;text-align:center;vertical-align:1px}
+            #${POPUP_ID} .krh-badge.kr{background:#70429a;color:#fff}
+            .awesomplete ul.krh-native-hidden{visibility:hidden!important;pointer-events:none!important}
         `;
         document.head.appendChild(style);
     }
@@ -199,31 +205,76 @@
 
     function hidePopup() {
         if (popup) popup.style.display = 'none';
+        const native = getNativeList();
+        if (native) native.classList.remove('krh-native-hidden');
         matches = [];
         selectedIndex = -1;
-        krKeyboardMode = false;
+    }
+
+    function getNativeList() {
+        if (!answerInput) return null;
+        const own = answerInput.closest('.awesomplete')?.querySelector('ul[role="listbox"]');
+        if (own) return own;
+        return Array.from(document.querySelectorAll('.awesomplete ul[role="listbox"]')).find(list => {
+            const input = list.closest('.awesomplete')?.querySelector('input');
+            return input === answerInput;
+        }) || null;
+    }
+
+    function nativeCandidates() {
+        const list = getNativeList();
+        if (!list) return [];
+        return Array.from(list.querySelectorAll('li')).map((element, index) => {
+            const label = (element.getAttribute('data-value') || element.textContent || '').trim();
+            return label ? { type: 'amq', label, target: label, nativeElement: element, order: index } : null;
+        }).filter(Boolean);
+    }
+
+    function buildUnifiedMatches(query) {
+        const result = [];
+        const seen = new Set();
+        for (const candidate of nativeCandidates()) {
+            const key = compact(candidate.target);
+            if (!key || seen.has(`amq:${key}`)) continue;
+            seen.add(`amq:${key}`);
+            result.push(candidate);
+        }
+        for (const row of search(query)) {
+            const target = preferredAnswer(row);
+            const key = `${compact(row.korean)}:${compact(target)}`;
+            if (!target || seen.has(`kr:${key}`)) continue;
+            seen.add(`kr:${key}`);
+            result.push({ type: 'kr', label: row.korean, target, row });
+        }
+        return result.slice(0, 15);
     }
 
     function renderPopup(query) {
         if (!enabled || !answerInput || !query.trim()) return hidePopup();
-        matches = search(query);
+        matches = buildUnifiedMatches(query);
         if (!matches.length) return hidePopup();
         ensurePopup();
+        const native = getNativeList();
+        if (native) native.classList.add('krh-native-hidden');
+        if (selectedIndex < 0 || selectedIndex >= matches.length) selectedIndex = 0;
         popup.textContent = '';
         const head = document.createElement('div');
         head.className = 'krh-head';
-        head.textContent = 'KR 별칭 · 클릭 또는 Alt+↓ 후 선택';
+        head.textContent = '통합 후보 · ↑/↓ 선택 · Enter 제출';
         popup.appendChild(head);
-        matches.forEach((row, index) => {
+        matches.forEach((candidate, index) => {
             const item = document.createElement('div');
             item.className = `krh-item${selectedIndex === index ? ' sel' : ''}`;
             item.setAttribute('role', 'option');
             const ko = document.createElement('div');
             ko.className = 'krh-ko';
-            ko.textContent = row.korean;
+            const badge = document.createElement('span');
+            badge.className = `krh-badge${candidate.type === 'kr' ? ' kr' : ''}`;
+            badge.textContent = candidate.type === 'kr' ? 'KR' : 'AMQ';
+            ko.append(badge, document.createTextNode(candidate.label));
             const target = document.createElement('div');
             target.className = 'krh-target';
-            target.textContent = [row.english, row.romaji].filter((v, i, a) => v && a.indexOf(v) === i).join(' · ');
+            target.textContent = candidate.type === 'kr' ? `→ ${candidate.target}` : 'AMQ 기본 후보';
             item.append(ko, target);
             item.addEventListener('mousedown', event => { event.preventDefault(); choose(index); });
             popup.appendChild(item);
@@ -237,9 +288,8 @@
         input.dispatchEvent(new Event('change', { bubbles: true }));
     }
 
-    function submitMapped(row) {
-        if (!answerInput || !row) return;
-        const value = preferredAnswer(row);
+    function submitValue(value) {
+        if (!answerInput || !value) return;
         if (!value) return;
         const now = Date.now();
         if (lastSubmit.value === value && now - lastSubmit.at < 250) return;
@@ -247,37 +297,49 @@
         hidePopup();
         answerInput.value = value;
         dispatchNativeInput(answerInput);
-        answerInput.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true }));
+        bypassNextEnter = true;
+        setTimeout(() => {
+            answerInput.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true }));
+            answerInput.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true }));
+        }, 20);
     }
 
-    function choose(index) { submitMapped(matches[index]); }
+    function choose(index) {
+        const candidate = matches[index];
+        if (!candidate) return;
+        submitValue(candidate.target);
+    }
+
+    function queueRender() {
+        const serial = ++renderSerial;
+        [0, 30, 90].forEach(delay => setTimeout(() => {
+            if (serial === renderSerial && answerInput?.value) renderPopup(answerInput.value);
+        }, delay));
+    }
 
     function onInput() {
         selectedIndex = -1;
-        krKeyboardMode = false;
-        renderPopup(answerInput.value);
+        queueRender();
     }
 
     function onKeyDown(event) {
-        if (event.key === 'ArrowDown' && event.altKey && matches.length) {
-            event.preventDefault();
-            event.stopImmediatePropagation();
-            krKeyboardMode = true;
-            selectedIndex = selectedIndex < 0 ? 0 : (selectedIndex + 1) % matches.length;
-            return renderPopup(answerInput.value);
+        if (bypassNextEnter && event.key === 'Enter') {
+            bypassNextEnter = false;
+            return;
         }
-        if (krKeyboardMode && matches.length && (event.key === 'ArrowDown' || event.key === 'ArrowUp')) {
+        const visible = popup?.style.display === 'block' && matches.length;
+        if (visible && (event.key === 'ArrowDown' || event.key === 'ArrowUp')) {
             event.preventDefault();
             event.stopImmediatePropagation();
             selectedIndex = (selectedIndex + (event.key === 'ArrowDown' ? 1 : -1) + matches.length) % matches.length;
             return renderPopup(answerInput.value);
         }
-        if (krKeyboardMode && event.key === 'Enter' && selectedIndex >= 0) {
+        if (visible && event.key === 'Enter' && selectedIndex >= 0) {
             event.preventDefault();
             event.stopImmediatePropagation();
             return choose(selectedIndex);
         }
-        if (event.key === 'Escape' && krKeyboardMode) {
+        if (visible && event.key === 'Escape') {
             event.preventDefault();
             event.stopImmediatePropagation();
             return hidePopup();
@@ -288,7 +350,7 @@
         const exact = exactKorean(query);
         event.preventDefault();
         event.stopImmediatePropagation();
-        if (exact) submitMapped(exact); // 한글 정확 일치만 자동 변환
+        if (exact) submitValue(preferredAnswer(exact)); // 한글 정확 일치만 자동 변환
         else renderPopup(query); // 매핑 없는 한글 원문 제출 차단
     }
 
