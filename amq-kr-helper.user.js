@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AMQ KR Helper
 // @namespace    amq-kr-helper
-// @version      1.10.14
+// @version      1.10.15
 // @description  AMQ 원래 입력을 유지하면서 한글/영문/로마자 별칭 검색을 보조합니다.
 // @match        https://animemusicquiz.com/*
 // @match        https://www.animemusicquiz.com/*
@@ -20,7 +20,7 @@
 (() => {
     'use strict';
 
-    const VERSION = '1.10.14';
+    const VERSION = '1.10.15';
     const DEFAULT_SHEET_URL = 'https://docs.google.com/spreadsheets/d/19-YDyMy__mPoP5Ozi7nPJ-A83XwsljODhhqmzuv1P2g/export?format=tsv&gid=0';
     const REFRESH_MS = 60_000;
     const MAX_KR_RESULTS = 50;
@@ -75,39 +75,71 @@
         try { localStorage.setItem(key, JSON.stringify(value)); } catch (_) { /* noop */ }
     }
 
-    function normalize(value) {
+    // AMQ 검색 감각에 맞춘 정규화 규칙:
+    // 1) 평범한 영문/한글 검색은 공백과 특수문자를 구분자로 보고 느슨하게 검색한다.
+    //    예: gloryline / glory line -> GLORY LINE, megami hen -> Megami-hen
+    // 2) 사용자가 검색어에 특수문자를 직접 입력하면 그 문자는 의미가 있다고 보고 보존한다.
+    //    예: -hen -> Megami-hen, -gl !-> GLORY LINE, `foo는 실제 ` 문자가 있는 제목만.
+    // 3) 유니코드 모양만 다른 대시/따옴표는 같은 기호로 통일한다.
+    function canonicalPunctuationText(value) {
         return String(value || '')
             .normalize('NFKC')
             .toLocaleLowerCase()
-            .replace(/[‐‑‒–—―_\-·・:;,.!?"'`~()[\]{}<>/\\|+*=]+/g, ' ')
+            .replace(/[‐‑‒–—―−]/g, '-')
+            .replace(/[‘’‚‛]/g, "'")
+            .replace(/[“”„‟]/g, '"')
             .replace(/\s+/g, ' ')
             .trim();
     }
 
-    function compact(value) { return normalize(value).replace(/\s/g, ''); }
+    function hasSearchPunctuation(value) {
+        return /[^\p{L}\p{N}\s]/u.test(canonicalPunctuationText(value));
+    }
+
+    function literalCompact(value) {
+        return canonicalPunctuationText(value).replace(/\s+/g, '');
+    }
+
+    function looseNormalize(value) {
+        return canonicalPunctuationText(value)
+            .replace(/[^\p{L}\p{N}]+/gu, ' ')
+            .replace(/\s+/g, ' ')
+            .trim();
+    }
+
+    function looseCompact(value) {
+        return looseNormalize(value).replace(/\s+/g, '');
+    }
+
+    function normalize(value) { return looseNormalize(value); }
+    function compact(value) { return looseCompact(value); }
     function hasHangul(value) { return /[ㄱ-ㅎㅏ-ㅣ가-힣]/.test(value); }
     function tokens(value) { return normalize(value).split(' ').filter(Boolean); }
 
-    // 검색어에 -, +, ~가 들어간 경우 이 문자는 AMQ 검색 명령으로 해석하지 않고
-    // KoreanAnswer 열에 실제로 존재하는 문자 그대로 검색한다.
-    // 예: -hen -> Megami-hen 매칭, -gl -> GLORY LINE 불일치.
-    function literalSearchText(value) {
-        return String(value || '')
-            .normalize('NFKC')
-            .toLocaleLowerCase()
-            .replace(/[‐‑‒–—―]/g, '-')
-            .replace(/\s+/g, ' ')
-            .trim();
-    }
+    function amqLikeTextMatches(text, query) {
+        const rawQuery = canonicalPunctuationText(query);
+        if (!rawQuery) return false;
 
-    function usesLiteralSpecialSearch(value) {
-        return /[-+~]/.test(String(value || ''));
+        // 검색어에 특수문자를 직접 쓴 경우: 공백만 무시하고 특수문자는 그대로 요구한다.
+        if (hasSearchPunctuation(query)) {
+            const q = literalCompact(query);
+            return !!q && literalCompact(text).includes(q);
+        }
+
+        // 특수문자를 안 쓴 경우: AMQ처럼 공백/구두점 차이는 느슨하게 허용한다.
+        const nq = looseNormalize(query);
+        const cq = looseCompact(query);
+        if (!cq) return false;
+        const nt = looseNormalize(text);
+        const ct = looseCompact(text);
+        const qTokens = nq.split(' ').filter(Boolean);
+        return ct.includes(cq) || qTokens.every(token => nt.includes(token) || ct.includes(token));
     }
 
     function searchCacheKey(value) {
-        return usesLiteralSpecialSearch(value)
-            ? `literal:${literalSearchText(value)}`
-            : `normal:${normalize(value)}`;
+        return hasSearchPunctuation(value)
+            ? `punct:${literalCompact(value)}`
+            : `loose:${looseCompact(value)}`;
     }
 
     function rowValue(raw, names) {
@@ -126,7 +158,7 @@
         if (!korean || (!english && !romaji)) return null;
         const item = { id: index, korean, english, romaji };
         item.nKorean = normalize(korean);
-        item.lKorean = literalSearchText(korean);
+        item.pKorean = literalCompact(korean);
         item.nEnglish = normalize(english);
         item.nRomaji = normalize(romaji);
         item.cKorean = compact(korean);
@@ -157,13 +189,12 @@
     }
 
     function scoreRow(row, context) {
-        const { nq, cq, qTokens, literalQuery } = context;
-        if (!nq || !cq) return null;
+        const { nq, cq, qTokens, punctuationQuery, literalQuery } = context;
+        if ((!nq || !cq) && !literalQuery) return null;
 
-        // -, +, ~가 검색어에 포함되면 해당 문자를 삭제/공백화하지 않고
-        // KoreanAnswer 실제 문자열에서 그대로 포함되는지 검사한다.
-        if (literalQuery) {
-            const haystack = row.lKorean || literalSearchText(row.korean);
+        // 사용자가 어떤 특수문자든 직접 입력한 경우에는 그 기호를 실제 문자열에서 요구한다.
+        if (punctuationQuery) {
+            const haystack = row.pKorean || literalCompact(row.korean);
             if (!haystack.includes(literalQuery)) return null;
             const exact = haystack === literalQuery;
             const tier = haystack.startsWith(literalQuery) ? 0 : 1;
@@ -175,9 +206,8 @@
             };
         }
 
-        // 일반 검색은 기존 v1.10.13 동작을 그대로 유지한다.
-        // KR 후보는 KoreanAnswer 열의 실제 문자열만 검색한다.
-        const allTokens = qTokens.every(token => row.nKorean.includes(token) || row.cKorean.includes(token.replace(/\s/g, '')));
+        // 일반 검색은 공백/구두점 차이를 느슨하게 허용하고, 공백을 생략해도 찾을 수 있게 유지한다.
+        const allTokens = qTokens.every(token => row.nKorean.includes(token) || row.cKorean.includes(token));
         const compactIncluded = row.cKorean.includes(cq);
         if (!allTokens && !compactIncluded) return null;
         let tier = 2;
@@ -188,12 +218,14 @@
     }
 
     function search(query) {
+        const punctuationQuery = hasSearchPunctuation(query);
         const nq = normalize(query);
-        const literalQuery = usesLiteralSpecialSearch(query) ? literalSearchText(query) : '';
+        const literalQuery = punctuationQuery ? literalCompact(query) : '';
         const context = {
             nq,
-            cq: nq.replace(/\s/g, ''),
+            cq: looseCompact(query),
             qTokens: nq.split(' ').filter(Boolean),
+            punctuationQuery,
             literalQuery
         };
         const compare = (a, b) => a.tier - b.tier || a.exact - b.exact || a.length - b.length || a.row.korean.localeCompare(b.row.korean, 'ko');
@@ -209,6 +241,10 @@
     }
 
     function exactKorean(query) {
+        if (hasSearchPunctuation(query)) {
+            const pq = literalCompact(query);
+            return rows.find(row => (row.pKorean || literalCompact(row.korean)) === pq) || null;
+        }
         const nq = normalize(query);
         const cq = compact(query);
         return rows.find(row => row.nKorean === nq || row.cKorean === cq) || null;
@@ -381,7 +417,7 @@
         getNativeLists().forEach(list => {
             Array.from(list.querySelectorAll('li:not([data-krh="true"])')).forEach((element, index) => {
                 const label = (element.getAttribute('data-value') || element.textContent || '').trim();
-                const key = compact(label);
+                const key = canonicalPunctuationText(label);
                 if (!label || !key || seen.has(key)) return;
                 seen.add(key);
                 output.push({ type: 'amq', label, target: label, nativeElement: element, order: index });
@@ -447,13 +483,21 @@
         lists.forEach(native => native.querySelectorAll('li[data-krh="true"]').forEach(item => item.remove()));
 
         const koreanQuery = hasHangul(query);
+        const punctuationQuery = hasSearchPunctuation(query);
         lists.forEach(nativeList => nativeList.classList.toggle('krh-korean-query', koreanQuery));
         const native = nativeCandidates();
         native.forEach(candidate => {
             if (koreanQuery) {
                 // AMQ가 직전 영문 검색에서 남긴 후보는 한글 검색 목록에서 완전히 제거한다.
-                // 다음 영문 입력 시 Awesomplete가 현재 검색어로 후보 DOM을 다시 생성한다.
                 candidate.nativeElement.remove();
+                return;
+            }
+
+            // AMQ 기본 후보가 특수문자를 무시해서 -gl -> GLORY LINE 같은 후보를 내놓더라도,
+            // KR Helper가 켜져 있을 때는 사용자가 직접 입력한 특수문자를 실제 제목에 요구한다.
+            if (punctuationQuery && !amqLikeTextMatches(candidate.label, query)) {
+                candidate.nativeElement.style.setProperty('display', 'none', 'important');
+                candidate.nativeElement.dataset.krhNativeHidden = 'true';
             } else if (candidate.nativeElement.dataset.krhNativeHidden === 'true') {
                 candidate.nativeElement.style.removeProperty('display');
                 delete candidate.nativeElement.dataset.krhNativeHidden;
