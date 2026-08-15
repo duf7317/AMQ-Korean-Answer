@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AMQ KR Helper
 // @namespace    amq-kr-helper
-// @version      1.10.12
+// @version      1.10.13
 // @description  AMQ 원래 입력을 유지하면서 한글/영문/로마자 별칭 검색을 보조합니다.
 // @match        https://animemusicquiz.com/*
 // @match        https://www.animemusicquiz.com/*
@@ -399,7 +399,7 @@
         const list = lists[0];
         if (!list) return;
         observeNativeLists();
-        lists.slice(1).forEach(native => native.querySelectorAll('li[data-krh="true"]').forEach(item => item.remove()));
+        lists.forEach(native => native.querySelectorAll('li[data-krh="true"]').forEach(item => item.remove()));
 
         const koreanQuery = hasHangul(query);
         lists.forEach(nativeList => nativeList.classList.toggle('krh-korean-query', koreanQuery));
@@ -415,37 +415,22 @@
             }
         });
 
-        const existingKrItems = Array.from(list.querySelectorAll('li[data-krh="true"]'));
-        const existingKr = new Map(existingKrItems.map(item => [item.dataset.krhKey || '', item]));
-        const usedKr = new Set();
         const krCandidates = krRows.map(row => ({ type: 'kr', label: row.korean, target: preferredAnswer(row), row }));
-        let previousItem = Array.from(list.children).filter(item => item.dataset.krh !== 'true').at(-1) || null;
         krCandidates.forEach(candidate => {
-            const key = `${compact(candidate.label)}:${compact(candidate.target)}`;
-            let item = existingKr.get(key);
-            if (!item) {
-                item = document.createElement('li');
-                item.dataset.krh = 'true';
-                item.dataset.krhKey = key;
-                item.setAttribute('role', 'option');
-                item.setAttribute('aria-selected', 'false');
-                item.addEventListener('mousedown', event => {
-                    event.preventDefault();
-                    event.stopImmediatePropagation();
-                    const selected = item.krhCandidate;
-                    if (selected) submitValue(selected.target);
-                }, true);
-            }
-            usedKr.add(item);
-            if (item.textContent !== candidate.label) item.textContent = candidate.label;
-            if (item.title !== candidate.target) item.title = candidate.target;
-            item.krhCandidate = candidate;
+            const item = document.createElement('li');
+            item.dataset.krh = 'true';
+            item.setAttribute('role', 'option');
+            item.setAttribute('aria-selected', 'false');
+            item.textContent = candidate.label;
+            item.title = candidate.target;
             candidate.nativeElement = item;
-            const expected = previousItem ? previousItem.nextElementSibling : list.firstElementChild;
-            if (expected !== item) list.insertBefore(item, expected);
-            previousItem = item;
+            item.addEventListener('mousedown', event => {
+                event.preventDefault();
+                event.stopImmediatePropagation();
+                submitValue(candidate.target);
+            }, true);
+            list.appendChild(item);
         });
-        existingKrItems.forEach(item => { if (!usedKr.has(item)) item.remove(); });
 
         matches = koreanQuery ? krCandidates : native.filter(candidate => candidate.nativeElement.style.display !== 'none').concat(krCandidates);
         if (!matches.length) {
