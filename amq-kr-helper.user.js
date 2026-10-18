@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AMQ KR Helper
 // @namespace    amq-kr-helper
-// @version      1.10.19
+// @version      1.10.21
 // @description  AMQ 원래 입력을 유지하면서 한글/영문/로마자 별칭 검색을 보조합니다.
 // @match        https://animemusicquiz.com/*
 // @match        https://www.animemusicquiz.com/*
@@ -20,7 +20,7 @@
 (() => {
     'use strict';
 
-    const VERSION = '1.10.19';
+    const VERSION = '1.10.21';
     const DEFAULT_SHEET_URL = 'https://docs.google.com/spreadsheets/d/19-YDyMy__mPoP5Ozi7nPJ-A83XwsljODhhqmzuv1P2g/export?format=tsv&gid=0';
     const REFRESH_MS = 60_000;
     const MAX_KR_RESULTS = 50;
@@ -82,6 +82,7 @@
     let refreshBusy = false;
     let enabled = loadValue(STORAGE.enabled, true) !== false;
     let lastSubmit = { value: '', at: 0 };
+    let convertedAnswer = null;
 
     function loadValue(key, fallback) {
         try {
@@ -481,7 +482,14 @@
                 const changed = mutations.some(mutation => mutation.type === 'attributes'
                     ? mutation.target === list || mutation.target.matches('li:not([data-krh="true"])')
                     : mutationContainsNativeCandidate(mutation));
-                if (!changed || !dropdownWanted || !enabled || !amqDropdownEnabled || !answerInput?.value) return;
+                if (!changed || !enabled || !amqDropdownEnabled || !answerInput?.value) return;
+                // A submitted/dismissed answer stays closed even when a late
+                // AMQ evaluation rebuilds or opens its native list.
+                if (dismissedQuery && searchCacheKey(answerInput.value) === dismissedQuery) {
+                    hidePopup(true);
+                    return;
+                }
+                if (!dropdownWanted) return;
                 if (hasHangul(answerInput.value)) {
                     // AMQ may close or empty the native list after our input handler.
                     // Repair before the next paint, not on the next arrow key/frame.
@@ -572,7 +580,7 @@
     function renderPopup(query, krRows = null) {
         if (!enabled || !amqDropdownEnabled || !isAnswerInputActive() || !query.trim()) return hidePopup(true);
         const queryKey = searchCacheKey(query);
-        if (dismissedQuery && queryKey === dismissedQuery) return hidePopup();
+        if (dismissedQuery && queryKey === dismissedQuery) return hidePopup(true);
         if (!krRows) {
             if (queryKey !== lastKrQuery) {
                 lastKrQuery = queryKey;
@@ -584,6 +592,11 @@
         const list = lists[0];
         if (!list) return;
         observeNativeLists(lists);
+        const queryChanged = lastRenderedQuery !== query || renderedList !== list;
+        if (queryChanged) {
+            selectedIndex = -1;
+            selectionActivated = false;
+        }
         const resume = pauseNativeObservers(lists);
         try {
             const koreanQuery = hasHangul(query);
@@ -662,6 +675,9 @@
             }
             lastRenderedQuery = query;
             setListVisible(list, matches.length > 0);
+            // Reset only for a new query. Repairs for the same query keep scroll,
+            // selection and existing nodes stable to avoid dropdown flicker.
+            if (queryChanged) lists.forEach(native => { native.scrollTop = 0; });
             if (matches.length) updateKeyboardSelection(list);
         } finally { resume(); }
     }
@@ -681,9 +697,11 @@
         if (lastSubmit.value === value && now - lastSubmit.at < 250) return;
         lastSubmit = { value, at: now };
         const serial = ++submitSerial;
+        const fromKorean = hasHangul(input.value);
         hidePopup();
         input.value = value;
         dispatchNativeInput(input);
+        convertedAnswer = fromKorean ? { input, value } : null;
         hidePopup(true);
         dismissedQuery = searchCacheKey(value);
         renderSerial += 1;
@@ -729,6 +747,7 @@
     function onInput(event) {
         // dispatchNativeInput is part of our own conversion; user edits invalidate it.
         if (!dispatchingInput) {
+            convertedAnswer = null;
             submitSerial += 1;
             if (typeof event?.isComposing === 'boolean') composing = event.isComposing;
         }
@@ -739,6 +758,7 @@
     }
 
     function onCompositionStart() {
+        convertedAnswer = null;
         composing = true;
         submitSerial += 1;
     }
@@ -776,11 +796,30 @@
         if (!enabled || !isAnswerInputActive()) return;
         if (event.key === 'Enter' && (composing || event.isComposing || event.keyCode === 229)) return;
         if ((event.key === 'Enter' || event.key.startsWith('Arrow')) && (event.ctrlKey || event.altKey || event.metaKey)) return;
+        if (event.key === 'Enter' && convertedAnswer?.input === answerInput &&
+            convertedAnswer.value === answerInput.value) {
+            // The Korean answer was already converted and submitted. Another
+            // Enter dismisses any leftover English popup without resubmitting.
+            // Do not cancel the first submission's pending synthetic Enter.
+            event.preventDefault();
+            event.stopImmediatePropagation();
+            dismissedQuery = searchCacheKey(answerInput.value);
+            pendingCompositionArrow = 0;
+            hidePopup(true);
+            return;
+        }
+        if (event.key === 'ArrowDown' || event.key === 'ArrowUp') convertedAnswer = null;
         if ((composing || event.isComposing) && hasHangul(answerInput?.value || '') && (event.key === 'ArrowDown' || event.key === 'ArrowUp')) {
             pendingCompositionArrow = event.key === 'ArrowDown' ? 1 : -1;
             return; // IME의 글자 확정은 막지 않고, compositionend 직후 선택을 적용한다.
         }
         if (!amqDropdownEnabled && hasHangul(answerInput?.value || '')) return;
+        if (!amqDropdownEnabled) return; // Native English handling remains with AMQ.
+        if (!composing && !event.isComposing && (event.key === 'ArrowDown' || event.key === 'ArrowUp')) {
+            // An explicit arrow may reopen a list closed after submission.
+            dismissedQuery = '';
+            dropdownWanted = true;
+        }
         if (!event.isComposing && !composing && ['ArrowDown', 'ArrowUp', 'Enter'].includes(event.key) && lastRenderedQuery !== answerInput.value) {
             renderPopup(answerInput.value);
         }
@@ -823,7 +862,19 @@
         }
         if (event.key !== 'Enter' || event.ctrlKey || event.altKey || event.metaKey || event.isComposing) return;
         const query = answerInput.value.trim();
-        if (!hasHangul(query)) return; // 영어/Romaji Enter는 AMQ에 100% 위임
+        if (!hasHangul(query)) {
+            // Let AMQ handle this Enter, including native selection/submission,
+            // then close after all synchronous handlers have finished.
+            const input = answerInput;
+            dropdownWanted = false;
+            queueMicrotask(() => {
+                if (input !== answerInput || !input.isConnected) return;
+                dismissedQuery = searchCacheKey(input.value);
+                pendingCompositionArrow = 0;
+                hidePopup(true);
+            });
+            return;
+        }
         const exact = exactKorean(query);
         event.preventDefault();
         event.stopImmediatePropagation();
@@ -858,6 +909,7 @@
     }
 
     function onAnswerBlur() {
+        convertedAnswer = null;
         composing = false;
         pendingCompositionArrow = 0;
         submitSerial += 1;
@@ -898,6 +950,7 @@
     function bindInput() {
         const next = findAnswerInput();
         if (next === answerInput) { observeNativeLists(); return; }
+        convertedAnswer = null;
         if (answerInput) {
             hidePopup();
             answerInput.removeEventListener('input', onInput);
