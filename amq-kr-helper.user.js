@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AMQ KR Helper
 // @namespace    amq-kr-helper
-// @version      1.10.22
+// @version      1.10.23
 // @description  AMQ 원래 입력을 유지하면서 한글/영문/로마자 별칭 검색을 보조합니다.
 // @match        https://animemusicquiz.com/*
 // @match        https://www.animemusicquiz.com/*
@@ -20,7 +20,7 @@
 (() => {
     'use strict';
 
-    const VERSION = '1.10.22';
+    const VERSION = '1.10.23';
     const DEFAULT_SHEET_URL = 'https://docs.google.com/spreadsheets/d/19-YDyMy__mPoP5Ozi7nPJ-A83XwsljODhhqmzuv1P2g/export?format=tsv&gid=0';
     const REFRESH_MS = 60_000;
     const MAX_KR_RESULTS = 50;
@@ -83,6 +83,7 @@
     let enabled = loadValue(STORAGE.enabled, true) !== false;
     let lastSubmit = { value: '', at: 0 };
     let koreanEnglishPopup = null;
+    let conversionEnterHeld = false;
 
     function loadValue(key, fallback) {
         try {
@@ -702,16 +703,41 @@
 
     function showKoreanEnglishPopup() {
         if (!hasKoreanEnglishPopup() || !enabled || !amqDropdownEnabled || !isAnswerInputActive()) return hidePopup(true);
-        // Remove only helper rows and restore native rows. Keep AMQ's English
-        // list available after the first Korean submission, until another Enter.
-        hidePopup();
-        const lists = getNativeLists();
+        const lists = getNativeLists(), list = lists[0];
+        if (!list) return;
         observeNativeLists(lists);
+        const selected = selectionActivated ? matches[selectedIndex] : null;
+        const firstShow = !koreanEnglishPopup.shown;
         const resume = pauseNativeObservers(lists);
         try {
+            lists.forEach(native => {
+                if (native.classList.contains('krh-korean-query')) native.classList.remove('krh-korean-query');
+                native.querySelectorAll('li[data-krh="true"]').forEach(item => item.remove());
+                native.querySelectorAll('li[data-krh-native-hidden="true"]').forEach(restoreNativeDisplay);
+            });
+            const next = nativeCandidates(lists);
+            matches = next;
+            selectedIndex = selected ? next.findIndex(item => item.label === selected.label && item.target === selected.target) : -1;
+            selectionActivated = selectedIndex >= 0;
+            renderedList = list;
+            lastRenderedQuery = answerInput.value;
+            // Helper arrow selection uses the actual native labels. Clear only
+            // AMQ's competing index, preserving our chosen English candidate.
             clearNativeSelection(lists);
-            lists.forEach(list => setListVisible(list, nativeCandidates([list]).length > 0));
+            lists.forEach(native => setListVisible(native, nativeCandidates([native]).length > 0));
+            if (firstShow) lists.forEach(native => { native.scrollTop = 0; });
+            koreanEnglishPopup.shown = true;
+            if (matches.length) updateKeyboardSelection(list);
         } finally { resume(); }
+    }
+
+    function onNativeSelectionComplete() {
+        if (!koreanEnglishPopup) return;
+        // Native mouse selection must not be reopened by our list observer.
+        const input = answerInput, value = input.value;
+        koreanEnglishPopup = null;
+        dismissedQuery = searchCacheKey(value);
+        queueMicrotask(() => finishSubmissionUi(input, value));
     }
 
     function finishSubmissionUi(input, value) {
@@ -735,10 +761,23 @@
         hidePopup();
         input.value = value;
         dispatchNativeInput(input);
-        if (fromKorean && amqDropdownEnabled) {
-            koreanEnglishPopup = { input, value };
-            dismissedQuery = '';
-            showKoreanEnglishPopup();
+        if (fromKorean) {
+            // First Korean Enter chooses a translation only, never an answer
+            // submission. The user confirms an English candidate separately.
+            if (sourceEvent?.type === 'keydown' && sourceEvent.key === 'Enter') {
+                conversionEnterHeld = true;
+                sourceEvent.preventDefault();
+                sourceEvent.stopImmediatePropagation();
+            }
+            if (amqDropdownEnabled) {
+                koreanEnglishPopup = { input, value, shown: false };
+                dismissedQuery = '';
+                showKoreanEnglishPopup();
+            } else {
+                hidePopup(true);
+                dismissedQuery = searchCacheKey(value);
+            }
+            return; // No synthetic keyboard event or delayed submit for conversion.
         } else {
             hidePopup(true);
             dismissedQuery = searchCacheKey(value);
@@ -806,6 +845,7 @@
     }
 
     function onCompositionStart() {
+        conversionEnterHeld = false;
         koreanEnglishPopup = null;
         composing = true;
         submitSerial += 1;
@@ -834,6 +874,12 @@
     }
 
     function onKeyUp(event) {
+        if (event.key === 'Enter' && conversionEnterHeld) {
+            conversionEnterHeld = false;
+            event.preventDefault();
+            event.stopImmediatePropagation();
+            return;
+        }
         if (!pendingCompositionArrow || event.isComposing) return;
         if (event.key === 'ArrowDown' || event.key === 'ArrowUp') queueMicrotask(applyPendingCompositionArrow);
     }
@@ -844,9 +890,19 @@
         if (!enabled || !isAnswerInputActive()) return;
         if (event.key === 'Enter' && (composing || event.isComposing || event.keyCode === 229)) return;
         if ((event.key === 'Enter' || event.key.startsWith('Arrow')) && (event.ctrlKey || event.altKey || event.metaKey)) return;
+        if (event.key === 'Enter') {
+            if (conversionEnterHeld && event.repeat) {
+                event.preventDefault();
+                event.stopImmediatePropagation();
+                return;
+            }
+            conversionEnterHeld = false;
+        }
         if (event.key === 'Enter' && hasKoreanEnglishPopup()) {
-            // The second Enter ALSO reaches AMQ and submits the current value.
-            // Close/clear the native selection so it cannot replace that value.
+            // Confirm the English selection, then let the original Enter reach
+            // AMQ once with that selected value and close the dropdown.
+            showKoreanEnglishPopup();
+            if (selectedIndex >= 0 && matches[selectedIndex]) return choose(selectedIndex, event);
             const input = answerInput, value = input.value;
             koreanEnglishPopup = null;
             dismissedQuery = searchCacheKey(value);
@@ -855,7 +911,8 @@
             queueMicrotask(() => finishSubmissionUi(input, value));
             return;
         }
-        if (event.key === 'ArrowDown' || event.key === 'ArrowUp' || event.key === 'Escape') koreanEnglishPopup = null;
+        if (event.key === 'Escape') koreanEnglishPopup = null;
+        if (hasKoreanEnglishPopup() && (event.key === 'ArrowDown' || event.key === 'ArrowUp')) showKoreanEnglishPopup();
         if ((composing || event.isComposing) && hasHangul(answerInput?.value || '') && (event.key === 'ArrowDown' || event.key === 'ArrowUp')) {
             pendingCompositionArrow = event.key === 'ArrowDown' ? 1 : -1;
             return; // IME의 글자 확정은 막지 않고, compositionend 직후 선택을 적용한다.
@@ -958,6 +1015,7 @@
     }
 
     function onAnswerBlur() {
+        conversionEnterHeld = false;
         koreanEnglishPopup = null;
         composing = false;
         pendingCompositionArrow = 0;
@@ -999,12 +1057,14 @@
     function bindInput() {
         const next = findAnswerInput();
         if (next === answerInput) { observeNativeLists(); return; }
+        conversionEnterHeld = false;
         koreanEnglishPopup = null;
         if (answerInput) {
             hidePopup();
             answerInput.removeEventListener('input', onInput);
             answerInput.removeEventListener('keydown', onKeyDown, true);
             answerInput.removeEventListener('keyup', onKeyUp, true);
+            answerInput.removeEventListener('awesomplete-selectcomplete', onNativeSelectionComplete);
             answerInput.removeEventListener('focus', onAnswerFocus);
             answerInput.removeEventListener('blur', onAnswerBlur);
             answerInput.removeEventListener('compositionstart', onCompositionStart);
@@ -1024,6 +1084,7 @@
         answerInput.addEventListener('input', onInput);
         answerInput.addEventListener('keydown', onKeyDown, true);
         answerInput.addEventListener('keyup', onKeyUp, true);
+        answerInput.addEventListener('awesomplete-selectcomplete', onNativeSelectionComplete);
         answerInput.addEventListener('focus', onAnswerFocus);
         answerInput.addEventListener('blur', onAnswerBlur);
         answerInput.addEventListener('compositionstart', onCompositionStart);
