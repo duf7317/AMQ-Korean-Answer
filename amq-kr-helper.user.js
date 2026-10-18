@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AMQ KR Helper
 // @namespace    amq-kr-helper
-// @version      1.10.18
+// @version      1.10.19
 // @description  AMQ 원래 입력을 유지하면서 한글/영문/로마자 별칭 검색을 보조합니다.
 // @match        https://animemusicquiz.com/*
 // @match        https://www.animemusicquiz.com/*
@@ -20,7 +20,7 @@
 (() => {
     'use strict';
 
-    const VERSION = '1.10.18';
+    const VERSION = '1.10.19';
     const DEFAULT_SHEET_URL = 'https://docs.google.com/spreadsheets/d/19-YDyMy__mPoP5Ozi7nPJ-A83XwsljODhhqmzuv1P2g/export?format=tsv&gid=0';
     const REFRESH_MS = 60_000;
     const MAX_KR_RESULTS = 50;
@@ -479,7 +479,7 @@
             if (nativeListObservers.has(list)) return;
             const listObserver = new MutationObserver(mutations => {
                 const changed = mutations.some(mutation => mutation.type === 'attributes'
-                    ? mutation.target === list
+                    ? mutation.target === list || mutation.target.matches('li:not([data-krh="true"])')
                     : mutationContainsNativeCandidate(mutation));
                 if (!changed || !dropdownWanted || !enabled || !amqDropdownEnabled || !answerInput?.value) return;
                 if (hasHangul(answerInput.value)) {
@@ -524,6 +524,32 @@
         return output;
     }
 
+    function syncNativeCandidateVisibility(lists, query) {
+        const koreanQuery = hasHangul(query);
+        const punctuationQuery = hasSearchPunctuation(query);
+        for (const list of lists) {
+            for (const element of list.querySelectorAll('li:not([data-krh="true"])')) {
+                const label = (element.getAttribute('data-value') || element.textContent || '').trim();
+                const filtered = koreanQuery || (punctuationQuery && !amqLikeTextMatches(label, query));
+                if (filtered) {
+                    if (element.dataset.krhNativeHidden !== 'true') {
+                        nativeDisplay.set(element, {
+                            value: element.style.getPropertyValue('display'),
+                            priority: element.style.getPropertyPriority('display')
+                        });
+                        element.dataset.krhNativeHidden = 'true';
+                    }
+                    // Reapply only when needed: late AMQ/theme writes must not
+                    // expose stale candidates or cause a mutation observer loop.
+                    if (element.style.getPropertyValue('display') !== 'none' ||
+                        element.style.getPropertyPriority('display') !== 'important') {
+                        element.style.setProperty('display', 'none', 'important');
+                    }
+                } else if (element.dataset.krhNativeHidden === 'true') restoreNativeDisplay(element);
+            }
+        }
+    }
+
     function scrollSelectionIntoView(list, element) {
         if (!list || !element) return;
         const itemTop = element.offsetTop;
@@ -561,20 +587,13 @@
         const resume = pauseNativeObservers(lists);
         try {
             const koreanQuery = hasHangul(query);
-            const punctuationQuery = hasSearchPunctuation(query);
             for (const native of lists) {
                 if (native.classList.contains('krh-korean-query') !== koreanQuery) native.classList.toggle('krh-korean-query', koreanQuery);
             }
+            // Hide every native element before de-duplication. A theme may override
+            // the Korean-query stylesheet, and duplicate labels still need hiding.
+            syncNativeCandidateVisibility(lists, query);
             const native = nativeCandidates(lists);
-            for (const candidate of native) {
-                const element = candidate.nativeElement;
-                const filtered = !koreanQuery && punctuationQuery && !amqLikeTextMatches(candidate.label, query);
-                if (filtered && element.dataset.krhNativeHidden !== 'true') {
-                    nativeDisplay.set(element, { value: element.style.getPropertyValue('display'), priority: element.style.getPropertyPriority('display') });
-                    element.style.setProperty('display', 'none', 'important');
-                    element.dataset.krhNativeHidden = 'true';
-                } else if (!filtered && element.dataset.krhNativeHidden === 'true') restoreNativeDisplay(element);
-            }
             const seen = new Set();
             const krCandidates = [];
             for (const row of krRows) {
