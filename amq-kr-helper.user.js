@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AMQ KR Helper
 // @namespace    amq-kr-helper
-// @version      1.10.15
+// @version      1.10.18
 // @description  AMQ 원래 입력을 유지하면서 한글/영문/로마자 별칭 검색을 보조합니다.
 // @match        https://animemusicquiz.com/*
 // @match        https://www.animemusicquiz.com/*
@@ -20,11 +20,18 @@
 (() => {
     'use strict';
 
-    const VERSION = '1.10.15';
+    const VERSION = '1.10.18';
     const DEFAULT_SHEET_URL = 'https://docs.google.com/spreadsheets/d/19-YDyMy__mPoP5Ozi7nPJ-A83XwsljODhhqmzuv1P2g/export?format=tsv&gid=0';
     const REFRESH_MS = 60_000;
     const MAX_KR_RESULTS = 50;
-    const POPUP_ID = 'amqKrHelperAliasPopup';
+    const SEARCH_CACHE_LIMIT = 40;
+    const REQUEST_TIMEOUT_MS = 20_000;
+    const NATIVE_OBSERVER_OPTIONS = {
+        childList: true, subtree: true, attributes: true,
+        attributeFilter: ['hidden', 'style', 'class']
+    };
+    const koreanCollator = new Intl.Collator('ko');
+    const POPUP_ID = 'amqKrHelperAliasPopup'; // Legacy popup to exclude from native lists.
     const STYLE_ID = 'amqKrHelperV17Style';
     const STORAGE = {
         sheetUrl: 'amqKrHelperSheetUrl',
@@ -36,6 +43,22 @@
     const MULTIPLE_CHOICE_SELECTOR = '#qpMultipleChoiceContainer .qpMultipleChoiceEntryText';
 
     let rows = [];
+    let exactLooseIndex = new Map();
+    let exactLiteralIndex = new Map();
+    let choiceIndex = new Map();
+    const searchCache = new Map();
+    let renderFrame = 0;
+    let lastRenderedQuery = '';
+    let composing = false;
+    let dispatchingInput = false;
+    let submitSerial = 0;
+    let lastSheetText = null;
+    let lastSheetUrl = '';
+    let renderedList = null;
+    let dropdownWanted = false;
+    const visibleListDisplay = new WeakMap();
+    const activeNativeObservers = new Map();
+    const nativeDisplay = new WeakMap();
     let answerInput = null;
     let popup = null;
     let matches = [];
@@ -46,8 +69,7 @@
     let renderSerial = 0;
     let lastKrQuery = '';
     let lastKrMatches = [];
-    let lastRenderSignature = '';
-    let amqDropdownEnabled = sessionStorage.getItem('amqKrHelperNativeDropdownEnabled') !== 'false';
+    let amqDropdownEnabled = true;
     const nativeListObservers = new WeakMap();
     let pendingCompositionArrow = 0;
     let refreshTimer = null;
@@ -71,16 +93,12 @@
     }
 
     function saveValue(key, value) {
-        try { if (typeof GM_setValue === 'function') GM_setValue(key, value); } catch (_) { /* noop */ }
+        try {
+            if (typeof GM_setValue === 'function') { GM_setValue(key, value); return; }
+        } catch (_) { /* use local storage when userscript storage fails */ }
         try { localStorage.setItem(key, JSON.stringify(value)); } catch (_) { /* noop */ }
     }
 
-    // AMQ 검색 감각에 맞춘 정규화 규칙:
-    // 1) 평범한 영문/한글 검색은 공백과 특수문자를 구분자로 보고 느슨하게 검색한다.
-    //    예: gloryline / glory line -> GLORY LINE, megami hen -> Megami-hen
-    // 2) 사용자가 검색어에 특수문자를 직접 입력하면 그 문자는 의미가 있다고 보고 보존한다.
-    //    예: -hen -> Megami-hen, -gl !-> GLORY LINE, `foo는 실제 ` 문자가 있는 제목만.
-    // 3) 유니코드 모양만 다른 대시/따옴표는 같은 기호로 통일한다.
     function canonicalPunctuationText(value) {
         return String(value || '')
             .normalize('NFKC')
@@ -114,7 +132,6 @@
     function normalize(value) { return looseNormalize(value); }
     function compact(value) { return looseCompact(value); }
     function hasHangul(value) { return /[ㄱ-ㅎㅏ-ㅣ가-힣]/.test(value); }
-    function tokens(value) { return normalize(value).split(' ').filter(Boolean); }
 
     function amqLikeTextMatches(text, query) {
         const rawQuery = canonicalPunctuationText(query);
@@ -137,9 +154,10 @@
     }
 
     function searchCacheKey(value) {
+        // Token boundaries matter: "ab c" and "a bc" have different matches.
         return hasSearchPunctuation(value)
             ? `punct:${literalCompact(value)}`
-            : `loose:${looseCompact(value)}`;
+            : `loose:${looseNormalize(value)}`;
     }
 
     function rowValue(raw, names) {
@@ -152,21 +170,19 @@
     }
 
     function prepareRow(raw, index) {
-        const korean = String(rowValue(raw, ['KoreanAnswer', 'Korean', '한글'])).trim();
-        const english = String(rowValue(raw, ['EnglishAnswer', 'EnglishAnsawer', 'English', '영어'])).trim();
-        const romaji = String(rowValue(raw, ['RomajiAnswer', 'Romaji', 'Romanji', '로마자'])).trim();
+        const korean = String(raw.KoreanAnswer || '').trim();
+        const english = String(raw.EnglishAnswer || '').trim();
+        const romaji = String(raw.RomajiAnswer || '').trim();
         if (!korean || (!english && !romaji)) return null;
-        const item = { id: index, korean, english, romaji };
-        item.nKorean = normalize(korean);
-        item.pKorean = literalCompact(korean);
-        item.nEnglish = normalize(english);
-        item.nRomaji = normalize(romaji);
-        item.cKorean = compact(korean);
-        item.cEnglish = compact(english);
-        item.cRomaji = compact(romaji);
-        item.search = [item.nKorean, item.nEnglish, item.nRomaji].filter(Boolean).join(' ');
-        item.compactSearch = [item.cKorean, item.cEnglish, item.cRomaji].filter(Boolean).join(' ');
-        return item;
+        const nKorean = normalize(korean);
+        const pKorean = literalCompact(korean);
+        const cKorean = nKorean.replace(/\s+/g, '');
+        return {
+            id: index, korean, english, romaji, nKorean, pKorean, cKorean,
+            // Keep punctuation in identity keys: e.g. A-B and AB may be different titles.
+            targetKey: JSON.stringify([canonicalPunctuationText(english), canonicalPunctuationText(romaji)]),
+            length: Math.min(korean.length, english.length || Infinity, romaji.length || Infinity)
+        };
     }
 
     function prepareRows(rawRows) {
@@ -184,8 +200,27 @@
         return result;
     }
 
-    function hydrate(rawRows) {
-        rows = prepareRows(rawRows);
+    function hydrate(rawRows, prepared = prepareRows(rawRows)) {
+        rows = prepared;
+        exactLooseIndex = new Map();
+        exactLiteralIndex = new Map();
+        choiceIndex = new Map();
+        searchCache.clear();
+        lastKrQuery = '';
+        lastKrMatches = [];
+        const add = (index, key, row) => {
+            if (!key) return;
+            let targets = index.get(key);
+            if (!targets) index.set(key, targets = new Map());
+            if (!targets.has(row.targetKey)) targets.set(row.targetKey, row);
+        };
+        for (const row of rows) {
+            add(exactLooseIndex, row.cKorean, row);
+            add(exactLiteralIndex, row.pKorean, row);
+            for (const name of [row.english, row.romaji]) {
+                add(choiceIndex, canonicalPunctuationText(name), row);
+            }
+        }
     }
 
     function scoreRow(row, context) {
@@ -202,7 +237,7 @@
                 row,
                 tier,
                 exact: exact ? 0 : 1,
-                length: Math.min(row.korean.length, row.english.length || Infinity, row.romaji.length || Infinity)
+                length: row.length
             };
         }
 
@@ -214,40 +249,50 @@
         if (row.nKorean.startsWith(nq) || row.cKorean.startsWith(cq)) tier = 0;
         else if (allTokens) tier = 1;
         const exact = row.nKorean === nq || row.cKorean === cq;
-        return { row, tier, exact: exact ? 0 : 1, length: Math.min(row.korean.length, row.english.length || Infinity, row.romaji.length || Infinity) };
+        return { row, tier, exact: exact ? 0 : 1, length: row.length };
     }
 
     function search(query) {
+        const key = searchCacheKey(query);
+        if (searchCache.has(key)) {
+            const cached = searchCache.get(key);
+            searchCache.delete(key);
+            searchCache.set(key, cached);
+            return cached;
+        }
         const punctuationQuery = hasSearchPunctuation(query);
         const nq = normalize(query);
-        const literalQuery = punctuationQuery ? literalCompact(query) : '';
         const context = {
-            nq,
-            cq: looseCompact(query),
-            qTokens: nq.split(' ').filter(Boolean),
-            punctuationQuery,
-            literalQuery
+            nq, cq: nq.replace(/\s+/g, ''), qTokens: nq.split(' ').filter(Boolean),
+            punctuationQuery, literalQuery: punctuationQuery ? literalCompact(query) : ''
         };
-        const compare = (a, b) => a.tier - b.tier || a.exact - b.exact || a.length - b.length || a.row.korean.localeCompare(b.row.korean, 'ko');
+        const compare = (a, b) => a.tier - b.tier || a.exact - b.exact || a.length - b.length || koreanCollator.compare(a.row.korean, b.row.korean);
         const best = [];
         for (const row of rows) {
             const result = scoreRow(row, context);
             if (!result) continue;
-            best.push(result);
-            best.sort(compare);
+            if (best.length === MAX_KR_RESULTS && compare(result, best[best.length - 1]) >= 0) continue;
+            let lo = 0, hi = best.length;
+            while (lo < hi) {
+                const mid = (lo + hi) >>> 1;
+                if (compare(result, best[mid]) < 0) hi = mid;
+                else lo = mid + 1;
+            }
+            best.splice(lo, 0, result);
             if (best.length > MAX_KR_RESULTS) best.pop();
         }
-        return best.map(result => result.row);
+        const result = best.map(entry => entry.row);
+        searchCache.set(key, result);
+        if (searchCache.size > SEARCH_CACHE_LIMIT) searchCache.delete(searchCache.keys().next().value);
+        return result;
     }
 
     function exactKorean(query) {
-        if (hasSearchPunctuation(query)) {
-            const pq = literalCompact(query);
-            return rows.find(row => (row.pKorean || literalCompact(row.korean)) === pq) || null;
-        }
-        const nq = normalize(query);
-        const cq = compact(query);
-        return rows.find(row => row.nKorean === nq || row.cKorean === cq) || null;
+        const index = hasSearchPunctuation(query) ? exactLiteralIndex : exactLooseIndex;
+        const key = hasSearchPunctuation(query) ? literalCompact(query) : compact(query);
+        const candidates = index.get(key);
+        // Never silently select the first anime when an alias has multiple targets.
+        return candidates?.size === 1 ? candidates.values().next().value : null;
     }
 
     function preferredAnswer(row) {
@@ -284,71 +329,98 @@
         document.head.appendChild(style);
     }
 
-    function ensurePopup() {
-        ensureStyle();
-        popup = document.getElementById(POPUP_ID);
-        if (!popup) {
-            popup = document.createElement('ul');
-            popup.id = POPUP_ID;
-            popup.setAttribute('role', 'listbox');
-            document.body.appendChild(popup);
-        }
-        return popup;
-    }
-
-    function positionPopup() {
-        if (!answerInput || !popup) return;
-        const rect = answerInput.getBoundingClientRect();
-        popup.style.left = `${rect.left}px`;
-        popup.style.top = `${Math.min(innerHeight - popup.offsetHeight - 8, rect.bottom + 5)}px`;
-        popup.style.width = `${rect.width}px`;
-    }
-
-    function isAnswerInputActive() {
-        if (!answerInput?.isConnected || answerInput.disabled || answerInput.readOnly) return false;
-        if (!answerInput.getClientRects().length) return false;
-        const style = getComputedStyle(answerInput);
+    function isAnswerInputActive(input = answerInput) {
+        if (!input?.isConnected || input.disabled || input.readOnly) return false;
+        if (!input.getClientRects().length) return false;
+        const style = getComputedStyle(input);
         if (style.display === 'none' || style.visibility === 'hidden') return false;
-        const container = answerInput.closest('#qpAnswerInput, #qpAnswerInputContainer, .qpAnswerInput');
-        if (container && !container.getClientRects().length) return false;
         return true;
     }
 
+    function nativeAutocompleteInstances(input = answerInput) {
+        try {
+            const page = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
+            const instances = page.Awesomplete?.all || window.Awesomplete?.all;
+            return Array.isArray(instances) ? instances.filter(instance => instance.input === input) : [];
+        } catch (_) { return []; }
+    }
+
+    function clearNativeSelection(lists = getNativeLists()) {
+        // Native Awesomplete indexes its own suggestions array. Helper items are
+        // display entries only, so AMQ must never retain an index into those items.
+        for (const instance of nativeAutocompleteInstances()) {
+            if (lists.includes(instance.ul)) instance.index = -1;
+        }
+        if (answerInput?.getAttribute('aria-activedescendant')) answerInput.setAttribute('aria-activedescendant', '');
+    }
+
+    function closeNativeAutocomplete(lists) {
+        for (const instance of nativeAutocompleteInstances()) {
+            if (!lists.includes(instance.ul)) continue;
+            try { instance.close({ reason: 'kr-helper' }); }
+            catch (error) { console.warn('[AMQ KR Helper] 자동완성 닫기 실패:', error); }
+            // close() may return early when the widget already considers itself closed.
+            instance.index = -1;
+        }
+        if (answerInput?.getAttribute('aria-expanded') === 'true') answerInput.setAttribute('aria-expanded', 'false');
+        clearNativeSelection(lists);
+    }
+
     function hidePopup(closeNative = false) {
+        dropdownWanted = false;
+        if (renderFrame) cancelAnimationFrame(renderFrame);
+        renderFrame = 0;
+        renderSerial += 1;
         if (popup) popup.style.display = 'none';
-        getNativeLists().forEach(native => {
-            native.classList.remove('krh-korean-query');
-            native.querySelectorAll('li[data-krh="true"]').forEach(item => item.remove());
-            native.querySelectorAll('li[data-krh-native-hidden="true"]').forEach(item => {
-                item.style.removeProperty('display');
-                delete item.dataset.krhNativeHidden;
+        const lists = getNativeLists();
+        const resume = pauseNativeObservers(lists);
+        try {
+            if (closeNative) closeNativeAutocomplete(lists);
+            else clearNativeSelection(lists);
+            lists.forEach(native => {
+                native.classList.remove('krh-korean-query');
+                native.querySelectorAll('li[data-krh="true"]').forEach(item => item.remove());
+                native.querySelectorAll('li[data-krh-native-hidden="true"]').forEach(restoreNativeDisplay);
+                if (closeNative && !native.hidden) native.hidden = true;
             });
-            if (closeNative) {
-                if (!native.hidden) native.hidden = true;
-            }
-        });
+        } finally { resume(); }
         matches = [];
         selectedIndex = -1;
         selectionActivated = false;
-        lastRenderSignature = '';
+        lastRenderedQuery = '';
+        renderedList = null;
+    }
+
+    function pauseNativeObservers(lists) {
+        const paused = lists.map(list => [list, activeNativeObservers.get(list)]).filter(([, observer]) => observer);
+        paused.forEach(([, observer]) => observer.disconnect());
+        return () => paused.forEach(([list, observer]) => {
+            if (activeNativeObservers.get(list) === observer) observer.observe(list, NATIVE_OBSERVER_OPTIONS);
+        });
+    }
+
+    function restoreNativeDisplay(element) {
+        const original = nativeDisplay.get(element);
+        if (original?.value) element.style.setProperty('display', original.value, original.priority);
+        else element.style.removeProperty('display');
+        nativeDisplay.delete(element);
+        delete element.dataset.krhNativeHidden;
     }
 
     function setAmqDropdownEnabled(value) {
         if (amqDropdownEnabled === value) return;
         amqDropdownEnabled = value;
-        sessionStorage.setItem('amqKrHelperNativeDropdownEnabled', value ? 'true' : 'false');
         if (!value) hidePopup();
         else if (enabled && answerInput?.value) queueRender();
         console.info(`[AMQ KR Helper] AMQ dropdown ${value ? 'enabled' : 'disabled'}`);
     }
 
     function detectDropdownCommandState(node) {
-        const text = String(node?.textContent || '');
-        if (!text) return;
-        const disabledAt = text.toLowerCase().lastIndexOf('dropdown disabled');
-        const enabledAt = text.toLowerCase().lastIndexOf('dropdown enabled');
-        if (disabledAt < 0 && enabledAt < 0) return;
-        setAmqDropdownEnabled(enabledAt > disabledAt);
+        // Do not interpret old chat history or another player's quoted sentence
+        // as the current setting. Only newly added complete command notices count.
+        const text = String(node?.textContent || '').trim();
+        const command = /^dropdown\s+(enabled|disabled)[.!]?$/i.exec(text);
+        if (command) setAmqDropdownEnabled(command[1].toLowerCase() === 'enabled');
     }
 
     function getNativeLists() {
@@ -385,36 +457,62 @@
     }
 
     function mutationContainsNativeCandidate(mutation) {
-        const changedNodes = [...mutation.addedNodes, ...mutation.removedNodes];
-        return changedNodes.some(node => {
+        const target = mutation.target.nodeType === 1 ? mutation.target : mutation.target.parentElement;
+        if (target?.closest('li[data-krh="true"]')) return false;
+        if ([...mutation.removedNodes].some(node => node.nodeType === 1 && node.matches('li[data-krh="true"]'))) return true;
+        return [...mutation.addedNodes, ...mutation.removedNodes].some(node => {
             if (!(node instanceof Element)) return String(node.textContent || '').trim().length > 0;
             if (node.matches('li[data-krh="true"]') || node.closest('li[data-krh="true"]')) return false;
             return node.matches('li') || !!node.querySelector('li:not([data-krh="true"])');
         });
     }
 
-    function observeNativeLists() {
-        getNativeLists().forEach(list => {
+    function observeNativeLists(lists = getNativeLists()) {
+        for (const [list, listObserver] of activeNativeObservers) {
+            if (!lists.includes(list)) {
+                listObserver.disconnect();
+                activeNativeObservers.delete(list);
+                nativeListObservers.delete(list);
+            }
+        }
+        lists.forEach(list => {
             if (nativeListObservers.has(list)) return;
             const listObserver = new MutationObserver(mutations => {
-                if (!mutations.some(mutationContainsNativeCandidate)) return;
-                if (!enabled || !amqDropdownEnabled || !answerInput?.value) return;
-                const query = answerInput.value;
-                const cachedKr = searchCacheKey(query) === lastKrQuery ? lastKrMatches : [];
-                // AMQ가 영어/Romaji 후보를 만든 바로 그 시점에 통합 목록을 갱신한다.
-                queueMicrotask(() => {
-                    if (answerInput?.value === query) renderPopup(query, cachedKr, true);
-                });
+                const changed = mutations.some(mutation => mutation.type === 'attributes'
+                    ? mutation.target === list
+                    : mutationContainsNativeCandidate(mutation));
+                if (!changed || !dropdownWanted || !enabled || !amqDropdownEnabled || !answerInput?.value) return;
+                if (hasHangul(answerInput.value)) {
+                    // AMQ may close or empty the native list after our input handler.
+                    // Repair before the next paint, not on the next arrow key/frame.
+                    renderPopup(answerInput.value);
+                } else queueRender(false);
             });
-            listObserver.observe(list, { childList: true, subtree: true });
+            listObserver.observe(list, NATIVE_OBSERVER_OPTIONS);
             nativeListObservers.set(list, listObserver);
+            activeNativeObservers.set(list, listObserver);
         });
     }
 
-    function nativeCandidates() {
+    function setListVisible(list, visible) {
+        const value = list.style.getPropertyValue('display');
+        if (value !== 'none') {
+            visibleListDisplay.set(list, { value, priority: list.style.getPropertyPriority('display') });
+        }
+        if (visible && value === 'none') {
+            const previous = visibleListDisplay.get(list);
+            if (previous?.value) list.style.setProperty('display', previous.value, previous.priority);
+            else list.style.removeProperty('display');
+        }
+        if (list.hidden === visible) list.hidden = !visible;
+        const expanded = visible ? 'true' : 'false';
+        if (answerInput?.getAttribute('aria-expanded') !== expanded) answerInput.setAttribute('aria-expanded', expanded);
+    }
+
+    function nativeCandidates(lists = getNativeLists()) {
         const output = [];
         const seen = new Set();
-        getNativeLists().forEach(list => {
+        lists.forEach(list => {
             Array.from(list.querySelectorAll('li:not([data-krh="true"])')).forEach((element, index) => {
                 const label = (element.getAttribute('data-value') || element.textContent || '').trim();
                 const key = canonicalPunctuationText(label);
@@ -424,28 +522,6 @@
             });
         });
         return output;
-    }
-
-    function buildUnifiedMatches(query, krRows) {
-        const result = [];
-        const seen = new Set();
-        if (!hasHangul(query)) {
-            for (const candidate of nativeCandidates()) {
-                const key = compact(candidate.target);
-                if (!key || seen.has(`amq:${key}`)) continue;
-                seen.add(`amq:${key}`);
-                result.push(candidate);
-            }
-        }
-        for (const row of krRows) {
-            const target = preferredAnswer(row);
-            const key = `${compact(row.korean)}:${compact(target)}`;
-            if (!target || seen.has(`kr:${key}`)) continue;
-            seen.add(`kr:${key}`);
-            result.push({ type: 'kr', label: row.korean, target, row });
-        }
-        // AMQ가 제공한 원본 후보는 하나도 자르지 않고, 정렬된 KR 후보만 추가한다.
-        return result;
     }
 
     function scrollSelectionIntoView(list, element) {
@@ -460,12 +536,14 @@
 
     function updateKeyboardSelection(list) {
         matches.forEach((candidate, index) => {
-            candidate.nativeElement?.setAttribute('aria-selected', selectedIndex === index ? 'true' : 'false');
+            const element = candidate.nativeElement;
+            const value = selectedIndex === index ? 'true' : 'false';
+            if (element && element.getAttribute('aria-selected') !== value) element.setAttribute('aria-selected', value);
         });
         if (selectedIndex >= 0) scrollSelectionIntoView(list, matches[selectedIndex]?.nativeElement);
     }
 
-    function renderPopup(query, krRows = null, force = false) {
+    function renderPopup(query, krRows = null) {
         if (!enabled || !amqDropdownEnabled || !isAnswerInputActive() || !query.trim()) return hidePopup(true);
         const queryKey = searchCacheKey(query);
         if (dismissedQuery && queryKey === dismissedQuery) return hidePopup();
@@ -479,86 +557,127 @@
         const lists = getNativeLists();
         const list = lists[0];
         if (!list) return;
-        observeNativeLists();
-        lists.forEach(native => native.querySelectorAll('li[data-krh="true"]').forEach(item => item.remove()));
-
-        const koreanQuery = hasHangul(query);
-        const punctuationQuery = hasSearchPunctuation(query);
-        lists.forEach(nativeList => nativeList.classList.toggle('krh-korean-query', koreanQuery));
-        const native = nativeCandidates();
-        native.forEach(candidate => {
-            if (koreanQuery) {
-                // AMQ가 직전 영문 검색에서 남긴 후보는 한글 검색 목록에서 완전히 제거한다.
-                candidate.nativeElement.remove();
-                return;
+        observeNativeLists(lists);
+        const resume = pauseNativeObservers(lists);
+        try {
+            const koreanQuery = hasHangul(query);
+            const punctuationQuery = hasSearchPunctuation(query);
+            for (const native of lists) {
+                if (native.classList.contains('krh-korean-query') !== koreanQuery) native.classList.toggle('krh-korean-query', koreanQuery);
             }
-
-            // AMQ 기본 후보가 특수문자를 무시해서 -gl -> GLORY LINE 같은 후보를 내놓더라도,
-            // KR Helper가 켜져 있을 때는 사용자가 직접 입력한 특수문자를 실제 제목에 요구한다.
-            if (punctuationQuery && !amqLikeTextMatches(candidate.label, query)) {
-                candidate.nativeElement.style.setProperty('display', 'none', 'important');
-                candidate.nativeElement.dataset.krhNativeHidden = 'true';
-            } else if (candidate.nativeElement.dataset.krhNativeHidden === 'true') {
-                candidate.nativeElement.style.removeProperty('display');
-                delete candidate.nativeElement.dataset.krhNativeHidden;
+            const native = nativeCandidates(lists);
+            for (const candidate of native) {
+                const element = candidate.nativeElement;
+                const filtered = !koreanQuery && punctuationQuery && !amqLikeTextMatches(candidate.label, query);
+                if (filtered && element.dataset.krhNativeHidden !== 'true') {
+                    nativeDisplay.set(element, { value: element.style.getPropertyValue('display'), priority: element.style.getPropertyPriority('display') });
+                    element.style.setProperty('display', 'none', 'important');
+                    element.dataset.krhNativeHidden = 'true';
+                } else if (!filtered && element.dataset.krhNativeHidden === 'true') restoreNativeDisplay(element);
             }
-        });
-
-        const krCandidates = krRows.map(row => ({ type: 'kr', label: row.korean, target: preferredAnswer(row), row }));
-        krCandidates.forEach(candidate => {
-            const item = document.createElement('li');
-            item.dataset.krh = 'true';
-            item.setAttribute('role', 'option');
-            item.setAttribute('aria-selected', 'false');
-            item.textContent = candidate.label;
-            item.title = candidate.target;
-            candidate.nativeElement = item;
-            item.addEventListener('mousedown', event => {
-                event.preventDefault();
-                event.stopImmediatePropagation();
-                submitValue(candidate.target);
-            }, true);
-            list.appendChild(item);
-        });
-
-        matches = koreanQuery ? krCandidates : native.filter(candidate => candidate.nativeElement.style.display !== 'none').concat(krCandidates);
-        if (!matches.length) {
-            list.hidden = true;
-            return;
-        }
-        if (selectedIndex >= matches.length) selectedIndex = -1;
-        matches.forEach((candidate, index) => candidate.nativeElement?.setAttribute('aria-selected', selectedIndex === index ? 'true' : 'false'));
-        list.hidden = false;
-        list.removeAttribute('hidden');
-        if (selectedIndex >= 0) scrollSelectionIntoView(list, matches[selectedIndex]?.nativeElement);
-        const signature = `${selectedIndex}|${matches.map(candidate => `${candidate.type}:${candidate.label}:${candidate.target}`).join('|')}`;
-        lastRenderSignature = signature;
+            const seen = new Set();
+            const krCandidates = [];
+            for (const row of krRows) {
+                const target = preferredAnswer(row);
+                const key = JSON.stringify([row.pKorean, canonicalPunctuationText(target)]);
+                if (!target || seen.has(key)) continue;
+                seen.add(key);
+                krCandidates.push({ type: 'kr', label: row.korean, target, row });
+            }
+            const next = koreanQuery ? krCandidates : native.filter(candidate => candidate.nativeElement.style.display !== 'none').concat(krCandidates);
+            const unchanged = renderedList === list && next.length === matches.length && next.every((candidate, index) => {
+                const previous = matches[index];
+                return candidate.type === previous.type && candidate.label === previous.label && candidate.target === previous.target &&
+                    (candidate.type === 'kr' ? candidate.row === previous.row && previous.nativeElement?.parentElement === list
+                        : candidate.nativeElement === previous.nativeElement);
+            });
+            clearNativeSelection(lists);
+            if (!unchanged) {
+                const selected = selectionActivated ? matches[selectedIndex] : null;
+                const reusable = new Map(matches.filter(candidate => candidate.type === 'kr')
+                    .map(candidate => [JSON.stringify([candidate.row.id, candidate.label, candidate.target]), candidate.nativeElement]));
+                const wantedElements = new Set();
+                for (const candidate of krCandidates) {
+                    const key = JSON.stringify([candidate.row.id, candidate.label, candidate.target]);
+                    let item = reusable.get(key);
+                    if (!item) {
+                        item = document.createElement('li');
+                        item.dataset.krh = 'true';
+                        item.setAttribute('role', 'option');
+                        item.setAttribute('aria-selected', 'false');
+                        item.textContent = candidate.label;
+                        item.title = candidate.target;
+                        item.addEventListener('mousedown', event => {
+                            if (event.button !== 0) return;
+                            event.preventDefault();
+                            event.stopImmediatePropagation();
+                        }, true);
+                        item.addEventListener('click', event => {
+                            if (event.button !== 0) return;
+                            event.preventDefault();
+                            event.stopImmediatePropagation();
+                            submitValue(candidate.target);
+                        }, true);
+                    }
+                    candidate.nativeElement = item;
+                    wantedElements.add(item);
+                }
+                for (const native of lists) {
+                    for (const item of native.querySelectorAll('li[data-krh="true"]')) {
+                        if (native !== list || !wantedElements.has(item)) item.remove();
+                    }
+                }
+                // Reuse matching nodes even when AMQ detached them. Keep list scroll,
+                // hover and selection intact instead of replacing every KR item.
+                let anchor = Array.from(list.children).filter(item => item.dataset.krh !== 'true').pop() || null;
+                for (const candidate of krCandidates) {
+                    const item = candidate.nativeElement;
+                    const nextNode = anchor ? anchor.nextSibling : list.firstChild;
+                    if (nextNode !== item) list.insertBefore(item, nextNode);
+                    anchor = item;
+                }
+                matches = next;
+                renderedList = list;
+                selectedIndex = selected ? matches.findIndex(candidate => candidate.type === selected.type && candidate.label === selected.label && candidate.target === selected.target) : -1;
+                if (selectedIndex < 0) selectionActivated = false;
+            }
+            lastRenderedQuery = query;
+            setListVisible(list, matches.length > 0);
+            if (matches.length) updateKeyboardSelection(list);
+        } finally { resume(); }
     }
 
     function dispatchNativeInput(input) {
-        input.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: input.value }));
-        input.dispatchEvent(new Event('change', { bubbles: true }));
+        dispatchingInput = true;
+        try {
+            input.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: input.value }));
+            input.dispatchEvent(new Event('change', { bubbles: true }));
+        } finally { dispatchingInput = false; }
     }
 
     function submitValue(value) {
-        if (!answerInput || !value) return;
-        if (!value) return;
+        const input = answerInput;
+        if (!enabled || !isAnswerInputActive() || !value || composing) return;
         const now = Date.now();
         if (lastSubmit.value === value && now - lastSubmit.at < 250) return;
         lastSubmit = { value, at: now };
+        const serial = ++submitSerial;
         hidePopup();
-        answerInput.value = value;
-        dispatchNativeInput(answerInput);
-        // 변환된 영문 값을 넣는 input 이벤트가 AMQ 자동완성을 다시 열 수 있으므로
-        // 이 제출값은 새 사용자 입력이 생길 때까지 닫힌 상태로 기억한다.
+        input.value = value;
+        dispatchNativeInput(input);
+        hidePopup(true);
         dismissedQuery = searchCacheKey(value);
         renderSerial += 1;
-        bypassNextEnter = true;
         setTimeout(() => {
-            answerInput.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true }));
-            answerInput.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true }));
+            // A new question/input or a new user edit must cancel this delayed Enter.
+            if (serial !== submitSerial || input !== answerInput || input.value !== value || !enabled || composing || !isAnswerInputActive()) return;
             hidePopup(true);
-            requestAnimationFrame(() => hidePopup(true));
+            bypassNextEnter = true;
+            try {
+                input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true }));
+                input.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true }));
+            } finally { bypassNextEnter = false; }
+            hidePopup(true);
         }, 20);
     }
 
@@ -568,44 +687,49 @@
         submitValue(candidate.target);
     }
 
-    function queueRender() {
-        const serial = ++renderSerial;
-        if (!isAnswerInputActive()) return hidePopup(true);
-        const query = answerInput?.value || '';
-        // 입력을 모두 지우면 이전 문제의 AMQ 후보가 다시 노출되지 않도록 목록 전체를 닫는다.
-        if (!query.trim()) {
-            hidePopup(true);
-            requestAnimationFrame(() => {
-                if (serial === renderSerial && !answerInput?.value.trim()) hidePopup(true);
-            });
-            return;
+    function queueRender(resetSelection = true) {
+        if (!enabled || !amqDropdownEnabled || !isAnswerInputActive()) return hidePopup(true);
+        if (resetSelection) { selectedIndex = -1; selectionActivated = false; }
+        if (!answerInput.value.trim()) {
+            renderSerial += 1;
+            if (renderFrame) cancelAnimationFrame(renderFrame);
+            renderFrame = 0;
+            return hidePopup(true);
         }
-        selectedIndex = -1;
-        selectionActivated = false;
-        lastKrQuery = searchCacheKey(query);
-        lastKrMatches = search(query);
-        // 고정 지연 없이 현재 후보를 즉시 표시한다.
-        renderPopup(query, lastKrMatches, true);
-        if (!hasHangul(query)) {
-            requestAnimationFrame(() => {
-                if (serial !== renderSerial || answerInput?.value !== query) return;
-                // 영문 입력에서만 AMQ가 같은 입력으로 만든 기본 후보를 한 번 더 합친다.
-                renderPopup(query, lastKrMatches, true);
-            });
-        }
+        // Reuse the pending frame instead of continually cancelling it. A late
+        // native update must not postpone the helper dropdown indefinitely.
+        if (renderFrame) return;
+        const serial = renderSerial;
+        renderFrame = requestAnimationFrame(() => {
+            renderFrame = 0;
+            if (serial !== renderSerial || !answerInput) return;
+            renderPopup(answerInput.value);
+        });
     }
 
-    function onInput() {
+    function onInput(event) {
+        // dispatchNativeInput is part of our own conversion; user edits invalidate it.
+        if (!dispatchingInput) {
+            submitSerial += 1;
+            if (typeof event?.isComposing === 'boolean') composing = event.isComposing;
+        }
         if (!enabled || !amqDropdownEnabled) return hidePopup();
         dismissedQuery = '';
+        dropdownWanted = true;
         queueRender();
+    }
+
+    function onCompositionStart() {
+        composing = true;
+        submitSerial += 1;
     }
 
     function applyPendingCompositionArrow() {
         if (!pendingCompositionArrow || !enabled || !amqDropdownEnabled || !answerInput?.value) return;
         const direction = pendingCompositionArrow;
         pendingCompositionArrow = 0;
-        renderPopup(answerInput.value, null, true);
+        dropdownWanted = true;
+        renderPopup(answerInput.value);
         const list = getNativeList();
         if (!list || list.hidden || !matches.length) return;
         selectedIndex = direction > 0 ? 0 : matches.length - 1;
@@ -614,6 +738,8 @@
     }
 
     function onCompositionEnd() {
+        composing = false;
+        dropdownWanted = enabled && amqDropdownEnabled;
         if (!enabled || !amqDropdownEnabled) return;
         queueRender();
         // IME가 첫 방향키를 글자 확정에 사용했다면 확정 직후 동일 방향 선택으로 이어간다.
@@ -626,21 +752,26 @@
     }
 
     function onKeyDown(event) {
-        if (bypassNextEnter && event.key === 'Enter') {
-            bypassNextEnter = false;
-            return;
-        }
-        if (event.isComposing && hasHangul(answerInput?.value || '') && (event.key === 'ArrowDown' || event.key === 'ArrowUp')) {
+        if (bypassNextEnter && event.key === 'Enter' && !event.isTrusted) return;
+        if (!['ArrowDown', 'ArrowUp', 'Enter', 'Escape'].includes(event.key)) return;
+        if (!enabled || !isAnswerInputActive()) return;
+        if (event.key === 'Enter' && (composing || event.isComposing || event.keyCode === 229)) return;
+        if ((event.key === 'Enter' || event.key.startsWith('Arrow')) && (event.ctrlKey || event.altKey || event.metaKey)) return;
+        if ((composing || event.isComposing) && hasHangul(answerInput?.value || '') && (event.key === 'ArrowDown' || event.key === 'ArrowUp')) {
             pendingCompositionArrow = event.key === 'ArrowDown' ? 1 : -1;
             return; // IME의 글자 확정은 막지 않고, compositionend 직후 선택을 적용한다.
         }
         if (!amqDropdownEnabled && hasHangul(answerInput?.value || '')) return;
+        if (!event.isComposing && !composing && ['ArrowDown', 'ArrowUp', 'Enter'].includes(event.key) && lastRenderedQuery !== answerInput.value) {
+            renderPopup(answerInput.value);
+        }
         let nativeList = getNativeList();
         let visible = !!nativeList && !nativeList.hidden && matches.length > 0;
         if (!visible && !event.isComposing && hasHangul(answerInput?.value || '') && (event.key === 'ArrowDown' || event.key === 'ArrowUp')) {
             // 느린 환경에서는 첫 방향키가 목록 열기에만 소비되지 않도록 KR 후보를 즉시 확정한다.
             dismissedQuery = '';
-            renderPopup(answerInput.value, null, true);
+            dropdownWanted = true;
+            renderPopup(answerInput.value);
             nativeList = getNativeList();
             visible = !!nativeList && !nativeList.hidden && matches.length > 0;
         }
@@ -682,18 +813,51 @@
     }
 
     function findAnswerInput() {
+        const candidates = [];
+        const seen = new Set();
         for (const selector of ANSWER_SELECTORS) {
-            const element = document.querySelector(selector);
-            if (element instanceof HTMLInputElement) return element;
+            for (const element of document.querySelectorAll(selector)) {
+                if (element instanceof HTMLInputElement && !seen.has(element)) {
+                    seen.add(element);
+                    candidates.push(element);
+                }
+            }
         }
-        return null;
+        const focused = document.activeElement;
+        if (seen.has(focused) && isAnswerInputActive(focused)) return focused;
+        return candidates.find(input => isAnswerInputActive(input)) ||
+            (answerInput?.isConnected && seen.has(answerInput) ? answerInput : candidates[0]) || null;
+    }
+
+    function onAnswerFocus() {
+        composing = false;
+        pendingCompositionArrow = 0;
+        if (enabled && amqDropdownEnabled && answerInput?.value) {
+            dropdownWanted = true;
+            queueRender(false);
+        }
+    }
+
+    function onAnswerBlur() {
+        composing = false;
+        pendingCompositionArrow = 0;
+        submitSerial += 1;
+        renderSerial += 1;
+        if (renderFrame) cancelAnimationFrame(renderFrame);
+        renderFrame = 0;
+        hidePopup(true);
     }
 
     function observeAnswerInputState() {
         answerStateObserver?.disconnect();
         if (!answerInput) return;
         answerStateObserver = new MutationObserver(() => {
-            if (!isAnswerInputActive()) hidePopup(true);
+            if (!isAnswerInputActive()) {
+                composing = false;
+                pendingCompositionArrow = 0;
+                submitSerial += 1;
+                hidePopup(true);
+            } else if (dropdownWanted && document.activeElement === answerInput && answerInput.value.trim()) queueRender(false);
         });
         const targets = new Set([
             answerInput,
@@ -714,43 +878,55 @@
 
     function bindInput() {
         const next = findAnswerInput();
-        if (!next) return;
-        if (next === answerInput) {
-            observeNativeLists();
-            return;
-        }
+        if (next === answerInput) { observeNativeLists(); return; }
         if (answerInput) {
+            hidePopup();
             answerInput.removeEventListener('input', onInput);
             answerInput.removeEventListener('keydown', onKeyDown, true);
             answerInput.removeEventListener('keyup', onKeyUp, true);
+            answerInput.removeEventListener('focus', onAnswerFocus);
+            answerInput.removeEventListener('blur', onAnswerBlur);
+            answerInput.removeEventListener('compositionstart', onCompositionStart);
             answerInput.removeEventListener('compositionend', onCompositionEnd);
             answerInput.closest('.awesomplete')?.classList.remove('krh-answer-wrapper');
         }
+        submitSerial += 1;
+        renderSerial += 1;
+        composing = false;
+        pendingCompositionArrow = 0;
         answerInput = next;
-        answerInput.closest('.awesomplete')?.classList.add('krh-answer-wrapper');
+        const wrapper = answerInput?.closest('.awesomplete');
+        if (wrapper && !wrapper.classList.contains('krh-answer-wrapper')) wrapper.classList.add('krh-answer-wrapper');
+        observeAnswerInputState();
+        observeNativeLists();
+        if (!answerInput) return;
         answerInput.addEventListener('input', onInput);
         answerInput.addEventListener('keydown', onKeyDown, true);
         answerInput.addEventListener('keyup', onKeyUp, true);
+        answerInput.addEventListener('focus', onAnswerFocus);
+        answerInput.addEventListener('blur', onAnswerBlur);
+        answerInput.addEventListener('compositionstart', onCompositionStart);
         answerInput.addEventListener('compositionend', onCompositionEnd);
-        observeAnswerInputState();
-        observeNativeLists();
     }
 
     function restoreMultipleChoice(elements = document.querySelectorAll(MULTIPLE_CHOICE_SELECTOR)) {
-        elements.forEach(element => {
-                if (element.dataset.krhApplied !== 'true') return;
-                if (element.textContent.trim() === element.dataset.krhKorean) {
-                    element.textContent = element.dataset.krhOriginalText || element.textContent;
-                    element.style.fontSize = element.dataset.krhOriginalFontSize || '';
-                    element.title = element.dataset.krhOriginalTitle || '';
-                }
-                // 내용이 이미 달라졌다면 AMQ가 새 문제의 문구와 크기를 적용한 상태이므로 건드리지 않는다.
-                delete element.dataset.krhApplied;
-                delete element.dataset.krhKorean;
-                delete element.dataset.krhOriginalText;
-                delete element.dataset.krhOriginalFontSize;
-                delete element.dataset.krhOriginalTitle;
-        });
+        multipleChoiceObserver?.disconnect();
+        try {
+            elements.forEach(element => {
+                    if (element.dataset.krhApplied !== 'true') return;
+                    if (element.textContent.trim() === element.dataset.krhKorean) {
+                        element.textContent = element.dataset.krhOriginalText || element.textContent;
+                        element.style.fontSize = element.dataset.krhOriginalFontSize || '';
+                        element.title = element.dataset.krhOriginalTitle || '';
+                    }
+                    // 내용이 이미 달라졌다면 AMQ가 새 문제의 문구와 크기를 적용한 상태이므로 건드리지 않는다.
+                    delete element.dataset.krhApplied;
+                    delete element.dataset.krhKorean;
+                    delete element.dataset.krhOriginalText;
+                    delete element.dataset.krhOriginalFontSize;
+                    delete element.dataset.krhOriginalTitle;
+            });
+        } finally { observeMultipleChoiceContainer(); }
     }
 
     function isMultipleChoiceVisible(container) {
@@ -761,88 +937,84 @@
     }
 
     function replaceMultipleChoice() {
-        const container = document.getElementById('qpMultipleChoiceContainer');
-        const elements = container?.querySelectorAll('.qpMultipleChoiceEntryText') || [];
-        if (!enabled || !isMultipleChoiceVisible(container)) {
-            restoreMultipleChoice(elements);
-            return;
-        }
-        if (!rows.length) return;
-        const byAnswer = new Map();
-        rows.forEach(row => {
-            [row.english, row.romaji].filter(Boolean).forEach(name => {
-                const key = compact(name);
-                // 같은 정답의 쉼표 별칭은 시트에 적힌 첫 번째 이름을 대표명으로 유지한다.
-                if (!byAnswer.has(key)) byAnswer.set(key, row.korean);
-            });
-        });
-        elements.forEach(element => {
-            if (element.dataset.krhApplied === 'true') {
-                if (element.textContent.trim() === element.dataset.krhKorean) return;
-                // AMQ가 같은 요소를 다음 문제의 새 선택지로 재사용한 경우 이전 표시를 폐기한다.
-                // 이 시점의 글자 크기와 툴팁은 새 선택지에 맞춰 AMQ가 계산한 값이므로 유지한다.
-                delete element.dataset.krhApplied;
-                delete element.dataset.krhKorean;
-                delete element.dataset.krhOriginalText;
-                delete element.dataset.krhOriginalFontSize;
-                delete element.dataset.krhOriginalTitle;
+        multipleChoiceObserver?.disconnect();
+        try {
+            const container = document.getElementById('qpMultipleChoiceContainer');
+            const elements = container?.querySelectorAll('.qpMultipleChoiceEntryText') || [];
+            if (!enabled || !isMultipleChoiceVisible(container)) {
+                restoreMultipleChoice(elements);
+                return;
             }
-            const original = element.textContent.trim();
-            const korean = byAnswer.get(compact(original));
-            if (!korean) return;
-            element.dataset.krhOriginalText = original;
-            element.dataset.krhOriginalFontSize = element.style.fontSize || '';
-            element.dataset.krhOriginalTitle = element.title || '';
-            element.dataset.krhKorean = korean;
-            element.dataset.krhApplied = 'true';
-            element.textContent = korean;
-            element.title = original;
-            element.style.fontSize = korean.length <= 12 ? '18px' : korean.length <= 20 ? '14px' : korean.length <= 28 ? '12px' : '10px';
-        });
+            if (!rows.length) return;
+            elements.forEach(element => {
+                if (element.dataset.krhApplied === 'true') {
+                    if (element.textContent.trim() === element.dataset.krhKorean) return;
+                    // AMQ가 같은 요소를 다음 문제의 새 선택지로 재사용한 경우 이전 표시를 폐기한다.
+                    // 이 시점의 글자 크기와 툴팁은 새 선택지에 맞춰 AMQ가 계산한 값이므로 유지한다.
+                    delete element.dataset.krhApplied;
+                    delete element.dataset.krhKorean;
+                    delete element.dataset.krhOriginalText;
+                    delete element.dataset.krhOriginalFontSize;
+                    delete element.dataset.krhOriginalTitle;
+                }
+                const original = element.textContent.trim();
+                const candidates = choiceIndex.get(canonicalPunctuationText(original));
+                const korean = candidates?.size === 1 ? candidates.values().next().value.korean : '';
+                if (!korean) return;
+                element.dataset.krhOriginalText = original;
+                element.dataset.krhOriginalFontSize = element.style.fontSize || '';
+                element.dataset.krhOriginalTitle = element.title || '';
+                element.dataset.krhKorean = korean;
+                element.dataset.krhApplied = 'true';
+                element.textContent = korean;
+                element.title = original;
+                element.style.fontSize = korean.length <= 12 ? '18px' : korean.length <= 20 ? '14px' : korean.length <= 28 ? '12px' : '10px';
+            });
+        } finally { observeMultipleChoiceContainer(); }
+    }
+
+    function observeMultipleChoiceContainer() {
+        if (multipleChoiceObserver && observedMultipleChoiceContainer?.isConnected) {
+            multipleChoiceObserver.observe(observedMultipleChoiceContainer, {
+                childList: true, subtree: true, characterData: true,
+                attributes: true, attributeFilter: ['class', 'style', 'hidden']
+            });
+        }
     }
 
     function ensureMultipleChoiceObserver() {
         const container = document.getElementById('qpMultipleChoiceContainer');
-        if (!container || container === observedMultipleChoiceContainer) return;
+        if (container === observedMultipleChoiceContainer) return;
         multipleChoiceObserver?.disconnect();
+        clearTimeout(multipleChoiceTimer);
         observedMultipleChoiceContainer = container;
+        if (!container) return;
         multipleChoiceObserver = new MutationObserver(() => {
             clearTimeout(multipleChoiceTimer);
-            // 숨겨지는 순간에는 원문을 즉시 복구해 AMQ의 다음 선택지 갱신을 방해하지 않는다.
-            if (!isMultipleChoiceVisible(container)) {
-                restoreMultipleChoice(container.querySelectorAll('.qpMultipleChoiceEntryText'));
-                return;
-            }
-            // AMQ가 네 선택지를 모두 채운 뒤 한 번만 번역한다.
             multipleChoiceTimer = setTimeout(replaceMultipleChoice, 35);
         });
-        multipleChoiceObserver.observe(container, {
-            childList: true,
-            subtree: true,
-            characterData: true,
-            attributes: true,
-            attributeFilter: ['class', 'style', 'hidden']
-        });
+        observeMultipleChoiceContainer();
         replaceMultipleChoice();
     }
 
     function parseCsv(text) {
-        if (text.includes('\t')) {
-            const lines = text.split(/\r?\n/).filter(line => line.trim());
-            if (lines.length < 2) return [];
-            const headers = lines.shift().split('\t').map(value => value.replace(/^\uFEFF/, '').trim());
-            return lines.map(line => {
-                const values = line.split('\t').map(value => value.trim());
-                return Object.fromEntries(headers.map((header, index) => [header, values[index] || '']));
-            });
+        // Detect the separator in the first record, outside quoted cells.
+        let delimiter = ',', inQuotes = false;
+        for (let i = 0; i < text.length; i += 1) {
+            const ch = text[i];
+            if (ch === '"') {
+                if (inQuotes && text[i + 1] === '"') i += 1;
+                else inQuotes = !inQuotes;
+            } else if (!inQuotes && ch === '\t') { delimiter = '\t'; break; }
+            else if (!inQuotes && (ch === '\n' || ch === '\r')) break;
         }
         const table = [];
         let row = [], cell = '', quoted = false;
         for (let i = 0; i < text.length; i += 1) {
             const ch = text[i];
             if (quoted && ch === '"' && text[i + 1] === '"') { cell += '"'; i += 1; }
-            else if (ch === '"') quoted = !quoted;
-            else if (ch === ',' && !quoted) { row.push(cell); cell = ''; }
+            else if (ch === '"' && (quoted || !cell)) quoted = !quoted;
+            else if (ch === delimiter && !quoted) { row.push(cell); cell = ''; }
             else if ((ch === '\n' || ch === '\r') && !quoted) {
                 if (ch === '\r' && text[i + 1] === '\n') i += 1;
                 row.push(cell); cell = '';
@@ -850,24 +1022,41 @@
                 row = [];
             } else cell += ch;
         }
-        row.push(cell); if (row.some(value => value.trim())) table.push(row);
-        if (table.length < 2) return [];
+        if (quoted) throw new Error('시트 데이터의 따옴표가 닫히지 않았습니다.');
+        row.push(cell);
+        if (row.some(value => value.trim())) table.push(row);
+        if (!table.length) throw new Error('시트 데이터가 비어 있습니다.');
         const headers = table.shift().map(value => value.replace(/^\uFEFF/, '').trim());
+        const keys = headers.map(header => header.toLowerCase().replace(/[^a-z가-힣]/g, ''));
+        const hasKorean = ['koreananswer', 'korean', '한글'].some(key => keys.includes(key));
+        const hasTarget = ['englishanswer', 'englishansawer', 'english', '영어', 'romajianswer', 'romaji', 'romanji', '로마자'].some(key => keys.includes(key));
+        if (!hasKorean || !hasTarget) throw new Error('한글/영어/로마자 헤더를 찾지 못했습니다. 시트 URL과 공유 설정을 확인하세요.');
         return table.map(values => Object.fromEntries(headers.map((header, index) => [header, values[index] || ''])));
     }
 
     function requestText(url) {
         const cacheBusted = `${url}${url.includes('?') ? '&' : '?'}_krh=${Date.now()}`;
         if (typeof GM_xmlhttpRequest === 'function') {
-            return new Promise((resolve, reject) => GM_xmlhttpRequest({ method: 'GET', url: cacheBusted, headers: { 'Cache-Control': 'no-cache' }, onload: response => response.status >= 200 && response.status < 300 ? resolve(response.responseText) : reject(new Error(`HTTP ${response.status}`)), onerror: reject }));
+            return new Promise((resolve, reject) => GM_xmlhttpRequest({
+                method: 'GET', url: cacheBusted, timeout: REQUEST_TIMEOUT_MS,
+                headers: { 'Cache-Control': 'no-cache' },
+                onload: response => response.status >= 200 && response.status < 300 ? resolve(response.responseText) : reject(new Error(`HTTP ${response.status}`)),
+                onerror: () => reject(new Error('시트 네트워크 오류')),
+                ontimeout: () => reject(new Error('시트 요청 시간 초과')),
+                onabort: () => reject(new Error('시트 요청 취소'))
+            }));
         }
-        return fetch(cacheBusted, { cache: 'no-store' }).then(response => { if (!response.ok) throw new Error(`HTTP ${response.status}`); return response.text(); });
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+        return fetch(cacheBusted, { cache: 'no-store', signal: controller.signal })
+            .then(response => { if (!response.ok) throw new Error(`HTTP ${response.status}`); return response.text(); })
+            .finally(() => clearTimeout(timer));
     }
 
     function normalizeSheetUrl(url) {
         const value = String(url || '').trim();
         if (!value) return '';
-        if (/\/export\?format=csv/i.test(value) || /output=csv/i.test(value)) return value;
+        if (/\/export\?/i.test(value) || /[?&]output=(csv|tsv)/i.test(value)) return value;
         const id = value.match(/\/spreadsheets\/d\/([a-zA-Z0-9-_]+)/)?.[1];
         const gid = value.match(/[?&#]gid=(\d+)/)?.[1] || '0';
         return id ? `https://docs.google.com/spreadsheets/d/${id}/export?format=csv&gid=${gid}` : value;
@@ -879,18 +1068,25 @@
         if (!url) return;
         refreshBusy = true;
         try {
-            const parsed = parseCsv(await requestText(url));
+            const payload = await requestText(url);
+            // Do not apply a response for an old URL after the settings have changed.
+            if (url !== normalizeSheetUrl(loadValue(STORAGE.sheetUrl, DEFAULT_SHEET_URL))) return;
+            if (url === lastSheetUrl && payload === lastSheetText) return;
+            const parsed = parseCsv(payload);
             const prepared = prepareRows(parsed);
-            if (prepared.length) {
-                rows = prepared;
-                lastKrQuery = '';
-                lastKrMatches = [];
-                saveValue(STORAGE.rows, parsed);
-                replaceMultipleChoice();
-                if (answerInput?.value) renderPopup(answerInput.value);
-            }
+            if (parsed.length && !prepared.length) throw new Error('사용 가능한 답변 행이 없습니다. 기존 캐시를 유지합니다.');
+            restoreMultipleChoice();
+            hydrate(parsed, prepared);
+            lastSheetText = payload;
+            lastSheetUrl = url;
+            saveValue(STORAGE.rows, parsed);
+            replaceMultipleChoice();
+            if (answerInput?.value) queueRender(false);
         } catch (error) { console.warn('[AMQ KR Helper] 시트 갱신 실패, 캐시 유지:', error); }
-        finally { refreshBusy = false; }
+        finally {
+            refreshBusy = false;
+            if (url !== normalizeSheetUrl(loadValue(STORAGE.sheetUrl, DEFAULT_SHEET_URL))) queueMicrotask(refreshSheet);
+        }
     }
 
     function restoreRows() {
@@ -944,35 +1140,60 @@
     }
 
     function start() {
+        ensureStyle();
         restoreRows();
-        detectDropdownCommandState(document.body);
+        // Dropdown command notices are inspected only as they arrive.
         configureMenu();
         bindInput();
-        replaceMultipleChoice();
+        ensureToggle();
+        ensureMultipleChoiceObserver();
         refreshSheet();
         if (!refreshTimer) refreshTimer = setInterval(refreshSheet, REFRESH_MS);
-        ensureMultipleChoiceObserver();
-        if (!watchTimer) watchTimer = setInterval(() => { ensureToggle(); bindInput(); ensureMultipleChoiceObserver(); replaceMultipleChoice(); }, 1000);
+        // Small fallback for state changes on ancestors and game UI replacements.
+        if (!watchTimer) watchTimer = setInterval(() => {
+            ensureToggle();
+            bindInput();
+            ensureMultipleChoiceObserver();
+            replaceMultipleChoice();
+            if (!isAnswerInputActive() || !answerInput?.value.trim()) hidePopup(true);
+            else if (dropdownWanted && enabled && amqDropdownEnabled && document.activeElement === answerInput && hasHangul(answerInput.value) &&
+                !dismissedQuery && (!getNativeList()?.querySelector('li[data-krh="true"]') || getNativeList()?.hidden)) queueRender(false);
+        }, 1000);
         if (!observer) {
             let scheduled = false;
+            const structureSelector = '#qpAnswerInput, input.qpAnswerInput, .qpAnswerInput, .awesomplete, ul[role="listbox"], #qpMultipleChoiceContainer, #menuBarOptionContainer';
             observer = new MutationObserver(mutations => {
-                mutations.forEach(mutation => mutation.addedNodes.forEach(detectDropdownCommandState));
-                if (scheduled) return;
+                let structureChanged = false;
+                for (const mutation of mutations) {
+                    const target = mutation.target.nodeType === 1 ? mutation.target : mutation.target.parentElement;
+                    // Our own candidate/choice writes do not require rebinding the page.
+                    if (target?.closest(`ul[role="listbox"], #${POPUP_ID}, #qpMultipleChoiceContainer`)) continue;
+                    for (const node of mutation.addedNodes) {
+                        if (node.nodeType === 1 && node.matches('script, style')) continue;
+                        detectDropdownCommandState(node);
+                    }
+                    for (const node of [...mutation.addedNodes, ...mutation.removedNodes]) {
+                        if (!(node instanceof Element)) continue;
+                        if (node.matches(structureSelector) || node.querySelector(structureSelector) ||
+                            (answerInput && node.contains(answerInput))) structureChanged = true;
+                    }
+                }
+                if (!structureChanged || scheduled) return;
                 scheduled = true;
                 requestAnimationFrame(() => {
                     scheduled = false;
                     bindInput();
-                    if (!isAnswerInputActive() || !answerInput.value.trim()) hidePopup(true);
+                    ensureToggle();
                     ensureMultipleChoiceObserver();
-                    replaceMultipleChoice();
+                    if (!isAnswerInputActive() || !answerInput?.value.trim()) hidePopup(true);
+                    else queueRender(false);
                 });
             });
-            observer.observe(document.body, {
-                childList: true,
-                subtree: true
-            });
+            observer.observe(document.body, { childList: true, subtree: true });
         }
-        addEventListener('resize', positionPopup, { passive: true });
+        document.addEventListener('focusin', event => {
+            if (event.target instanceof HTMLInputElement && event.target !== answerInput) bindInput();
+        });
         document.addEventListener('mousedown', event => {
             if (event.target === answerInput) return;
             if (getNativeLists().some(list => list.contains(event.target))) return;
