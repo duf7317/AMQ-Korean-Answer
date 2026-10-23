@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AMQ KR Helper
 // @namespace    amq-kr-helper
-// @version      1.10.23
+// @version      1.10.24
 // @description  AMQ 원래 입력을 유지하면서 한글/영문/로마자 별칭 검색을 보조합니다.
 // @match        https://animemusicquiz.com/*
 // @match        https://www.animemusicquiz.com/*
@@ -20,8 +20,8 @@
 (() => {
     'use strict';
 
-    const VERSION = '1.10.23';
-    const DEFAULT_SHEET_URL = 'https://docs.google.com/spreadsheets/d/19-YDyMy__mPoP5Ozi7nPJ-A83XwsljODhhqmzuv1P2g/export?format=tsv&gid=0';
+    const VERSION = '1.10.24';
+    const DEFAULT_SHEET_URL = 'https://docs.google.com/spreadsheets/d/19-YDyMy__mPoP5Ozi7nPJ-A83XwsljODhhqmzuv1P2g/export?format=csv&gid=0';
     const REFRESH_MS = 60_000;
     const MAX_KR_RESULTS = 50;
     const SEARCH_CACHE_LIMIT = 40;
@@ -1238,6 +1238,24 @@
     function normalizeSheetUrl(url) {
         const value = String(url || '').trim();
         if (!value) return '';
+        // Google TSV exports can contain literal leading quotes in titles.
+        // They are ambiguous with quoted-field syntax. Request CSV instead:
+        // Google escapes the title quotes explicitly and parseCsv preserves them.
+        // Normalize stored TSV URLs too, not only the new default URL.
+        try {
+            const parsed = new URL(value);
+            if (parsed.hostname === 'docs.google.com' && parsed.pathname.startsWith('/spreadsheets/')) {
+                if (/\/export\/?$/.test(parsed.pathname)) {
+                    parsed.searchParams.set('format', 'csv');
+                    if (parsed.searchParams.has('output')) parsed.searchParams.set('output', 'csv');
+                    return parsed.href;
+                }
+                if (/\/pub\/?$/.test(parsed.pathname) && /^(csv|tsv)$/i.test(parsed.searchParams.get('output') || '')) {
+                    parsed.searchParams.set('output', 'csv');
+                    return parsed.href;
+                }
+            }
+        } catch (_) { /* fall through to shared-link handling */ }
         if (/\/export\?/i.test(value) || /[?&]output=(csv|tsv)/i.test(value)) return value;
         const id = value.match(/\/spreadsheets\/d\/([a-zA-Z0-9-_]+)/)?.[1];
         const gid = value.match(/[?&#]gid=(\d+)/)?.[1] || '0';
